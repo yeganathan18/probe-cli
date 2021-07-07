@@ -16,17 +16,30 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
 	"golang.org/x/net/http2"
 )
 
 // Config contains the experiment config.
-type Config struct{}
+type Config struct {
+	dialer     netx.Dialer
+	tlsDialer  netx.TLSDialer
+	quicDialer netx.QUICDialer
+}
 
 // Measurer performs the measurement.
 type Measurer struct {
 	Config Config
+}
+
+func (m *Measurer) Init() {
+	conf := netx.Config{}
+	m.Config.dialer = netx.NewDialer(conf)
+	m.Config.tlsDialer = netx.NewTLSDialer(conf)
+	m.Config.quicDialer = netx.NewQUICDialer(conf)
 }
 
 // TestKeys contains webconnectivity test keys.
@@ -98,6 +111,8 @@ func (m Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
+	m.Init()
+
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -112,13 +127,14 @@ func (m Measurer) Run(
 	dnsResult := webconnectivity.DNSLookup(ctx, webconnectivity.DNSLookupConfig{
 		Begin:   measurement.MeasurementStartTimeSaved,
 		Session: sess, URL: URL})
-
 	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
+
 	// 2. each IP address: sequence (later: parrallelism)
 	for _, ip := range epnts {
 		// TODO discard ipv6?
-		// 3a. Dial connect
-		conn, err := net.Dial("tcp", ip)
+
+		// Dial connect
+		conn, err := m.Config.dialer.DialContext(ctx, "tcp", ip)
 		if err != nil {
 			fmt.Println("dial failure", err)
 			continue
@@ -128,50 +144,35 @@ func (m Measurer) Run(
 		var transport http.RoundTripper
 		switch URL.Scheme {
 		case "http":
+			transport = getHTTP1Transport(conn)
 		case "https":
 			config := &tls.Config{
 				ServerName: URL.Hostname(),
 				NextProtos: []string{"h2", "http/1.1"},
 			}
-			// 4a. Handshake
-			tlsconn := tls.Client(conn, config)
-			err = tlsconn.Handshake()
+			// Handshake
+			// TODO: fill netx.Config
+			handshaker := m.Config.tlsDialer.(*netxlite.TLSDialer).TLSHandshaker
+			tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
 			if err != nil {
 				fmt.Println("TLS handshake failure", err)
 				continue
 			}
 			// TODO(wrap error)
-			state := tlsconn.ConnectionState()
 			// ALPN ?
 			switch state.NegotiatedProtocol {
 			case "h2":
 				// HTTP 2 + TLS.
-				transport = &http2.Transport{
-					DialTLS: func(network string, addr string, cfg *tls.Config) (net.Conn, error) {
-						return tlsconn, nil
-					},
-					TLSClientConfig:    config,
-					DisableCompression: true,
-				}
+				transport = getHTTP2Transport(tlsconn, config)
 			default:
 				// assume HTTP 1.x + TLS.
-				transport = http.DefaultTransport.(*http.Transport).Clone()
-				transport.(*http.Transport).DisableCompression = true
-				transport.(*http.Transport).DialTLS = func(network string, addr string) (net.Conn, error) {
-					return tlsconn, nil
-				}
+				transport = getHTTP1Transport(conn)
 			}
 		default:
 			return errors.New("invalid scheme")
 		}
-		// 5a. Roundtrip
-		// TODO handle redirect
-		req, err := http.NewRequest("GET", URL.String(), nil)
-		runtimex.PanicOnError(err, "http.NewRequest failed")
-		req = req.WithContext(ctx)
-		req.Header.Set("Accept", httpheader.Accept())
-		req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
-		req.Host = URL.Hostname()
+		// Roundtrip
+		req := getRequest(ctx, URL)
 
 		jar, err := cookiejar.New(nil)
 		runtimex.PanicOnError(err, "cookiejar.New failed")
@@ -179,17 +180,20 @@ func (m Measurer) Run(
 			Jar:       jar,
 			Transport: transport,
 		}
-
+		// we use CheckRedirect to reset the custom Dial methods. This is because we cannot re-use our
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-			fmt.Println("redirect")
 			if t, ok := httpClient.Transport.(*http.Transport); ok {
-				t.DialTLS = nil
+				t.DialTLSContext = m.Config.tlsDialer.DialTLSContext
 			}
 			if t, ok := httpClient.Transport.(*http2.Transport); ok {
-				t.DialTLS = nil
+				t.DialTLS = func(network string, addr string, cfg *tls.Config) (net.Conn, error) {
+					return m.Config.tlsDialer.DialTLSContext(ctx, network, addr)
+				}
 			}
 			if t, ok := httpClient.Transport.(*http3.RoundTripper); ok {
-				t.Dial = nil
+				t.Dial = func(network string, addr string, cfg *tls.Config, qcfg *quic.Config) (quic.EarlySession, error) {
+					return m.Config.quicDialer.DialContext(ctx, network, addr, cfg, qcfg)
+				}
 			}
 			return nil
 		}
@@ -202,19 +206,20 @@ func (m Measurer) Run(
 		}
 		fmt.Println("HTTP response", resp.StatusCode)
 
+		// Transport: QUIC
 		if URL.Scheme == "https" {
 			tlscfg := &tls.Config{
 				ServerName: URL.Hostname(),
 				NextProtos: []string{"h3"},
 			}
 			qcfg := &quic.Config{}
-			// 3b. Dial QUIC
-			qsess, err := quic.DialAddrEarly(ip, tlscfg, qcfg)
+			// Dial QUIC
+			qsess, err := m.Config.quicDialer.DialContext(ctx, "udp", ip, tlscfg, qcfg)
 			if err != nil {
 				fmt.Println("quic dial failure", err)
 				continue
 			}
-			// 5b. HTTP/3 Roundtrip
+			// HTTP/3 Roundtrip
 			transport = &http3.RoundTripper{
 				DisableCompression: true,
 				TLSClientConfig:    tlscfg,
@@ -236,6 +241,36 @@ func (m Measurer) Run(
 
 	return nil
 
+}
+
+func getHTTP1Transport(conn net.Conn) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	transport.Dial = func(network string, addr string) (net.Conn, error) {
+		return conn, nil
+	}
+	return transport
+}
+
+func getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
+	transport := &http2.Transport{
+		DialTLS: func(network string, addr string, cfg *tls.Config) (net.Conn, error) {
+			return conn, nil
+		},
+		TLSClientConfig:    config,
+		DisableCompression: true,
+	}
+	return transport
+}
+
+func getRequest(ctx context.Context, URL *url.URL) *http.Request {
+	req, err := http.NewRequest("GET", URL.String(), nil)
+	runtimex.PanicOnError(err, "http.NewRequest failed")
+	req = req.WithContext(ctx)
+	req.Header.Set("Accept", httpheader.Accept())
+	req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
+	req.Host = URL.Hostname()
+	return req
 }
 
 // SummaryKeys contains summary keys for this experiment.
