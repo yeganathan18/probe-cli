@@ -179,21 +179,36 @@ func (m Measurer) Run(
 			Jar:       jar,
 			Transport: transport,
 		}
+
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			fmt.Println("redirect")
+			if t, ok := httpClient.Transport.(*http.Transport); ok {
+				t.DialTLS = nil
+			}
+			if t, ok := httpClient.Transport.(*http2.Transport); ok {
+				t.DialTLS = nil
+			}
+			if t, ok := httpClient.Transport.(*http3.RoundTripper); ok {
+				t.Dial = nil
+			}
+			return nil
+		}
+
 		defer httpClient.CloseIdleConnections()
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			fmt.Println("HTTP failure", err)
+			fmt.Println("HTTP failure", err, resp)
 			continue
 		}
 		fmt.Println("HTTP response", resp.StatusCode)
 
-		// 3b. Dial QUIC
 		if URL.Scheme == "https" {
 			tlscfg := &tls.Config{
 				ServerName: URL.Hostname(),
 				NextProtos: []string{"h3"},
 			}
 			qcfg := &quic.Config{}
+			// 3b. Dial QUIC
 			qsess, err := quic.DialAddrEarly(ip, tlscfg, qcfg)
 			if err != nil {
 				fmt.Println("quic dial failure", err)
@@ -208,7 +223,8 @@ func (m Measurer) Run(
 					return qsess, nil
 				},
 			}
-			resp, err = transport.RoundTrip(req)
+			httpClient.Transport = transport
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				fmt.Println("HTTP/3 failure", err)
 				continue
