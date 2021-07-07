@@ -11,6 +11,7 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/hirl"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/httphostheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/ndt7"
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/psiphon"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/riseupvpn"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/run"
@@ -310,6 +311,18 @@ var experimentsByName = map[string]func(*Session) *ExperimentBuilder{
 				))
 			},
 			config:      &urlgetter.Config{},
+			inputPolicy: InputStrictlyRequired,
+		}
+	},
+
+	"nwebconnectivity": func(session *Session) *ExperimentBuilder {
+		return &ExperimentBuilder{
+			build: func(config interface{}) *Experiment {
+				return NewExperiment(session, nwebconnectivity.NewExperimentMeasurer(
+					*config.(*nwebconnectivity.Config),
+				))
+			},
+			config:      &nwebconnectivity.Config{},
 			inputPolicy: InputStrictlyRequired,
 		}
 	},
