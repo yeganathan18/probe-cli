@@ -111,6 +111,13 @@ func (m Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
+	handleRedirect := func(resp *http.Response) error {
+		fmt.Println("redirect")
+		loc, _ := resp.Location()
+		measurement.Input = model.MeasurementTarget(loc.String())
+		return m.Run(ctx, sess, measurement, callbacks)
+	}
+
 	m.Init()
 
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -180,29 +187,18 @@ func (m Measurer) Run(
 			Jar:       jar,
 			Transport: transport,
 		}
-		// we use CheckRedirect to reset the custom Dial methods. This is because we cannot re-use our
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-			if t, ok := httpClient.Transport.(*http.Transport); ok {
-				t.DialTLSContext = m.Config.tlsDialer.DialTLSContext
-			}
-			if t, ok := httpClient.Transport.(*http2.Transport); ok {
-				t.DialTLS = func(network string, addr string, cfg *tls.Config) (net.Conn, error) {
-					return m.Config.tlsDialer.DialTLSContext(ctx, network, addr)
-				}
-			}
-			if t, ok := httpClient.Transport.(*http3.RoundTripper); ok {
-				t.Dial = func(network string, addr string, cfg *tls.Config, qcfg *quic.Config) (quic.EarlySession, error) {
-					return m.Config.quicDialer.DialContext(ctx, network, addr, cfg, qcfg)
-				}
-			}
-			return nil
+			return http.ErrUseLastResponse
 		}
-
 		defer httpClient.CloseIdleConnections()
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			fmt.Println("HTTP failure", err, resp)
 			continue
+		}
+		switch resp.StatusCode {
+		case 301, 302, 303, 307, 308:
+			return handleRedirect(resp)
 		}
 		fmt.Println("HTTP response", resp.StatusCode)
 
@@ -233,6 +229,10 @@ func (m Measurer) Run(
 			if err != nil {
 				fmt.Println("HTTP/3 failure", err)
 				continue
+			}
+			switch resp.StatusCode {
+			case 301, 302, 303, 307, 308:
+				return handleRedirect(resp)
 			}
 			fmt.Println("HTTP/3 response", resp.StatusCode)
 		}
