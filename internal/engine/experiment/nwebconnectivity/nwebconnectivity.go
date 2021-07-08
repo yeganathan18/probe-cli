@@ -239,7 +239,7 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 		switch resp.StatusCode {
 		case 301, 302, 303, 307, 308:
 			redirects <- resp
-			return nil, errors.New("redirect QUIC")
+			return nil, errors.New("redirect")
 		}
 	}
 	return resp, err
