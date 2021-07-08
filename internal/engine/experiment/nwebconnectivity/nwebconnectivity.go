@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/lucas-clemente/quic-go"
@@ -134,6 +135,96 @@ var (
 	ErrUnsupportedInput = errors.New("unsupported input scheme")
 )
 
+func (m *Measurer) measure(
+	ctx context.Context,
+	addr string,
+	URL *url.URL,
+	wg *sync.WaitGroup,
+	redirects chan *http.Response,
+) error {
+	defer wg.Done()
+	// connect
+	conn, err := m.connect(ctx, addr)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	var transport http.RoundTripper
+	switch URL.Scheme {
+	case "http":
+		transport = m.getHTTP1Transport(conn)
+	case "https":
+		// Handshake
+		transport, err = m.tlsHandshake(ctx, conn, URL.Hostname())
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+	default:
+		return errors.New("invalid scheme")
+	}
+
+	// // roundtrip
+	resp, err := m.httpRoundtrip(ctx, URL, transport)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	switch resp.StatusCode {
+	case 301, 302, 303, 307, 308:
+		redirects <- resp
+	}
+	fmt.Println("HTTP response", resp.StatusCode)
+	return nil
+}
+
+// httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
+func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper) (*http.Response, error) {
+	req := m.getRequest(ctx, URL)
+	jar, err := cookiejar.New(nil)
+	runtimex.PanicOnError(err, "cookiejar.New failed")
+	httpClient := &http.Client{
+		Jar:       jar,
+		Transport: transport,
+	}
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer httpClient.CloseIdleConnections()
+	return httpClient.Do(req)
+}
+
+// tlsHandshake performs the TLS handshake
+func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (http.RoundTripper, error) {
+	config := &tls.Config{
+		ServerName: hostname,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+	handshaker := m.TLSDialer.(*netxlite.TLSDialer).TLSHandshaker
+	tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
+	if err != nil {
+		return nil, err
+	}
+	return m.getTransport(state, tlsconn, config)
+}
+
+// getTransport determines the appropriate HTTP Transport from the ALPN
+func (m *Measurer) getTransport(state tls.ConnectionState, tlsconn net.Conn, config *tls.Config) (http.RoundTripper, error) {
+	// ALPN ?
+	switch state.NegotiatedProtocol {
+	case "h2":
+		// HTTP 2 + TLS.
+		return m.getHTTP2Transport(tlsconn, config), nil
+	default:
+		// assume HTTP 1.x + TLS.
+		return m.getHTTP1Transport(tlsconn), nil
+	}
+}
+
+func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
+	return m.Dialer.DialContext(ctx, "tcp", addr)
+}
+
 // Run implements ExperimentMeasurer.Run.
 func (m *Measurer) Run(
 	ctx context.Context,
@@ -141,12 +232,6 @@ func (m *Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
-	handleRedirect := func(resp *http.Response) error {
-		loc, _ := resp.Location()
-		measurement.Input = model.MeasurementTarget(loc.String())
-		return m.Run(ctx, sess, measurement, callbacks)
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -163,92 +248,22 @@ func (m *Measurer) Run(
 		Session: sess, URL: URL})
 	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
 
-	// 2. each IP address: sequence (later: parrallelism)
+	var wg sync.WaitGroup
+	redirects := make(chan *http.Response, 1)
+
+	// 2. each IP address
 	for _, ip := range epnts {
 		// TODO discard ipv6?
-
-		// Dial connect
-		conn, err := m.Dialer.DialContext(ctx, "tcp", ip)
-		if err != nil {
-			continue
-		}
-		// TODO(wrap error)
-
-		var transport http.RoundTripper
-		switch URL.Scheme {
-		case "http":
-			transport = m.getHTTP1Transport(conn)
-		case "https":
-			config := &tls.Config{
-				ServerName: URL.Hostname(),
-				NextProtos: []string{"h2", "http/1.1"},
-			}
-			// Handshake
-			handshaker := m.TLSDialer.(*netxlite.TLSDialer).TLSHandshaker
-			tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
-			if err != nil {
-				continue
-			}
-			// TODO(wrap error)
-			// ALPN ?
-			switch state.NegotiatedProtocol {
-			case "h2":
-				// HTTP 2 + TLS.
-				transport = m.getHTTP2Transport(tlsconn, config)
-			default:
-				// assume HTTP 1.x + TLS.
-				transport = m.getHTTP1Transport(conn)
-			}
-		default:
-			return errors.New("invalid scheme")
-		}
-		// Roundtrip
-		req := m.getRequest(ctx, URL)
-
-		jar, err := cookiejar.New(nil)
-		runtimex.PanicOnError(err, "cookiejar.New failed")
-		httpClient := &http.Client{
-			Jar:       jar,
-			Transport: transport,
-		}
-		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		defer httpClient.CloseIdleConnections()
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			continue
-		}
-		switch resp.StatusCode {
-		case 301, 302, 303, 307, 308:
-			return handleRedirect(resp)
-		}
-		fmt.Println("HTTP response", resp.StatusCode)
-
-		// Transport: QUIC
-		if URL.Scheme == "https" {
-			tlscfg := &tls.Config{
-				ServerName: URL.Hostname(),
-				NextProtos: []string{"h3"},
-			}
-			qcfg := &quic.Config{}
-			// Dial QUIC
-			qsess, err := m.QUICDialer.DialContext(ctx, "udp", ip, tlscfg, qcfg)
-			if err != nil {
-				continue
-			}
-			// HTTP/3 Roundtrip
-			httpClient.Transport = m.getHTTP3Transport(qsess, tlscfg, qcfg)
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				continue
-			}
-			switch resp.StatusCode {
-			case 301, 302, 303, 307, 308:
-				return handleRedirect(resp)
-			}
-			fmt.Println("HTTP/3 response", resp.StatusCode)
-		}
+		wg.Add(1)
+		go m.measure(ctx, ip, URL, &wg, redirects)
+	}
+	wg.Wait()
+	close(redirects)
+	for resp := range redirects {
+		fmt.Println("redirect")
+		loc, _ := resp.Location()
+		measurement.Input = model.MeasurementTarget(loc.String())
+		return m.Run(ctx, sess, measurement, callbacks)
 	}
 	return nil
 
