@@ -256,7 +256,7 @@ func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname stri
 	if err != nil {
 		return nil, err
 	}
-	return m.getTransport(qsess.ConnectionState().TLS.ConnectionState, qsess, tlscfg), nil
+	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
 }
 
 // tlsHandshake performs the TLS handshake
@@ -304,17 +304,15 @@ func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
-func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{}, config *tls.Config) http.RoundTripper {
+func (m *Measurer) getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
 	// ALPN ?
 	switch state.NegotiatedProtocol {
-	case "h3":
-		return m.getHTTP3Transport(connsess.(quic.EarlySession), config, &quic.Config{})
 	case "h2":
 		// HTTP 2 + TLS.
-		return m.getHTTP2Transport(connsess.(net.Conn), config)
+		return m.getHTTP2Transport(conn, config)
 	default:
 		// assume HTTP 1.x + TLS.
-		dialer := &singleDialerHTTP1{conn: connsess.(*net.Conn)}
+		dialer := &singleDialerHTTP1{conn: &conn}
 		return netxlite.NewHTTPTransport(dialer, config, m.handshaker)
 	}
 }
