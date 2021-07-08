@@ -173,8 +173,23 @@ func (m *Measurer) measure(
 	switch resp.StatusCode {
 	case 301, 302, 303, 307, 308:
 		redirects <- resp
+		return errors.New("redirect")
 	}
 	fmt.Println("HTTP response", resp.StatusCode)
+
+	transport, err = m.quicHandshake(ctx, addr, URL.Hostname())
+	resp, err = m.httpRoundtrip(ctx, URL, transport)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	switch resp.StatusCode {
+	case 301, 302, 303, 307, 308:
+		redirects <- resp
+		return errors.New("redirect QUIC")
+	}
+	fmt.Println("HTTP/3 response", resp.StatusCode)
+
 	return nil
 }
 
@@ -194,6 +209,19 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 	return httpClient.Do(req)
 }
 
+func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname string) (http.RoundTripper, error) {
+	tlscfg := &tls.Config{
+		ServerName: hostname,
+		NextProtos: []string{"h3"},
+	}
+	qcfg := &quic.Config{}
+	qsess, err := m.QUICDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
+	if err != nil {
+		return nil, err
+	}
+	return m.getTransport(qsess.ConnectionState().TLS.ConnectionState, qsess, tlscfg), nil
+}
+
 // tlsHandshake performs the TLS handshake
 func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (http.RoundTripper, error) {
 	config := &tls.Config{
@@ -205,19 +233,21 @@ func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname str
 	if err != nil {
 		return nil, err
 	}
-	return m.getTransport(state, tlsconn, config)
+	return m.getTransport(state, tlsconn, config), nil
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
-func (m *Measurer) getTransport(state tls.ConnectionState, tlsconn net.Conn, config *tls.Config) (http.RoundTripper, error) {
+func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{}, config *tls.Config) http.RoundTripper {
 	// ALPN ?
 	switch state.NegotiatedProtocol {
+	case "h3":
+		return m.getHTTP3Transport(connsess.(quic.EarlySession), config, &quic.Config{})
 	case "h2":
 		// HTTP 2 + TLS.
-		return m.getHTTP2Transport(tlsconn, config), nil
+		return m.getHTTP2Transport(connsess.(net.Conn), config)
 	default:
 		// assume HTTP 1.x + TLS.
-		return m.getHTTP1Transport(tlsconn), nil
+		return m.getHTTP1Transport(connsess.(net.Conn))
 	}
 }
 
@@ -249,7 +279,8 @@ func (m *Measurer) Run(
 	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
 
 	var wg sync.WaitGroup
-	redirects := make(chan *http.Response, 1)
+	fmt.Println(URL, len(epnts))
+	redirects := make(chan *http.Response, len(epnts)+1)
 
 	// 2. each IP address
 	for _, ip := range epnts {
@@ -258,9 +289,10 @@ func (m *Measurer) Run(
 		go m.measure(ctx, ip, URL, &wg, redirects)
 	}
 	wg.Wait()
-	close(redirects)
-	for resp := range redirects {
-		fmt.Println("redirect")
+	redirects <- nil
+
+	resp := <-redirects
+	if resp != nil {
 		loc, _ := resp.Location()
 		measurement.Input = model.MeasurementTarget(loc.String())
 		return m.Run(ctx, sess, measurement, callbacks)
