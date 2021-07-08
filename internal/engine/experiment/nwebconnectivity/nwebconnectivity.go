@@ -35,30 +35,46 @@ type Measurer struct {
 	QUICDialer netx.QUICDialer
 }
 
-type SingleDialer struct {
-	conn  *net.Conn
+type singleDialerHTTP1 struct {
+	sync.Mutex
+	conn *net.Conn
+}
+
+func (s *singleDialerHTTP1) getConn(network string, addr string) (net.Conn, error) {
+	s.Lock()
+	defer s.Unlock()
+	if s.conn != nil {
+		c := s.conn
+		s.conn = nil
+		return *c, nil
+	}
+	return nil, errors.New("cannot reuse connection")
+}
+
+type singleDialerH2 struct {
+	sync.Mutex
+	conn *net.Conn
+}
+
+func (s *singleDialerH2) getTLSConn(network string, addr string, cfg *tls.Config) (net.Conn, error) {
+	s.Lock()
+	defer s.Unlock()
+	if s.conn != nil {
+		c := s.conn
+		s.conn = nil
+		return *c, nil
+	}
+	return nil, errors.New("cannot reuse connection")
+}
+
+type singleDialerH3 struct {
+	sync.Mutex
 	qsess *quic.EarlySession
 }
 
-func (s *SingleDialer) getConn(network string, addr string) (net.Conn, error) {
-	if s.conn != nil {
-		c := s.conn
-		s.conn = nil
-		return *c, nil
-	}
-	return nil, errors.New("cannot reuse connection")
-}
-
-func (s *SingleDialer) getTLSConn(network string, addr string, cfg *tls.Config) (net.Conn, error) {
-	if s.conn != nil {
-		c := s.conn
-		s.conn = nil
-		return *c, nil
-	}
-	return nil, errors.New("cannot reuse connection")
-}
-
-func (s *SingleDialer) getQUICSess(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
+func (s *singleDialerH3) getQUICSess(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
+	s.Lock()
+	defer s.Unlock()
 	if s.qsess != nil {
 		qs := s.qsess
 		s.qsess = nil
@@ -321,13 +337,13 @@ func (m *Measurer) runWithRedirect(
 func (m *Measurer) getHTTP1Transport(conn net.Conn) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
-	transport.Dial = (&SingleDialer{conn: &conn}).getConn
+	transport.Dial = (&singleDialerHTTP1{conn: &conn}).getConn
 	return transport
 }
 
 func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
 	transport := &http2.Transport{
-		DialTLS:            (&SingleDialer{conn: &conn}).getTLSConn,
+		DialTLS:            (&singleDialerH2{conn: &conn}).getTLSConn,
 		TLSClientConfig:    config,
 		DisableCompression: true,
 	}
@@ -339,7 +355,7 @@ func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config
 		DisableCompression: true,
 		TLSClientConfig:    tlscfg,
 		QuicConfig:         qcfg,
-		Dial:               (&SingleDialer{qsess: &qsess}).getQUICSess,
+		Dial:               (&singleDialerH3{qsess: &qsess}).getQUICSess,
 	}
 	return transport
 }
