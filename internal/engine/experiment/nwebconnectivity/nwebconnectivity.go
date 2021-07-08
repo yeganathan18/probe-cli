@@ -110,26 +110,25 @@ func (m *Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
-	return m.runWithRedirect(ctx, sess, measurement, callbacks, 0)
+	URL, err := url.Parse(string(measurement.Input))
+	if err != nil {
+		return ErrInputIsNotAnURL
+	}
+	return m.runWithRedirect(ctx, URL, 0)
 }
 
 func (m *Measurer) runWithRedirect(
 	ctx context.Context,
-	sess model.ExperimentSession,
-	measurement *model.Measurement,
-	callbacks model.ExperimentCallbacks,
+	URL *url.URL,
 	nRedirects int,
 ) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	URL, err := url.Parse(string(measurement.Input))
-	if err != nil {
-		return ErrInputIsNotAnURL
-	}
 	if URL.Scheme != "http" && URL.Scheme != "https" {
 		return ErrUnsupportedInput
 	}
+
 	// 1. perform DNS lookup
 	addresses, err := m.dnsLookup(ctx, URL.Hostname())
 	if err != nil {
@@ -156,8 +155,7 @@ func (m *Measurer) runWithRedirect(
 			return errors.New("stopped after 10 redirects")
 		}
 		loc, _ := resp.Location()
-		measurement.Input = model.MeasurementTarget(loc.String())
-		return m.runWithRedirect(ctx, sess, measurement, callbacks, nRedirects+1)
+		return m.runWithRedirect(ctx, loc, nRedirects+1)
 	}
 	return nil
 
