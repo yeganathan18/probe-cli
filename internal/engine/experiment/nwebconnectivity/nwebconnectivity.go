@@ -30,9 +30,9 @@ type Config struct{}
 // Measurer performs the measurement.
 type Measurer struct {
 	Config     Config
-	Dialer     netx.Dialer
-	TLSDialer  netx.TLSDialer
-	QUICDialer netx.QUICDialer
+	dialer     netx.Dialer
+	tlsDialer  netx.TLSDialer
+	quicDialer netx.QUICDialer
 }
 
 type singleDialerHTTP1 struct {
@@ -121,9 +121,9 @@ func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
 	nConf := netx.Config{}
 	return &Measurer{
 		Config:     config,
-		Dialer:     netx.NewDialer(nConf),
-		TLSDialer:  netx.NewTLSDialer(nConf),
-		QUICDialer: netx.NewQUICDialer(nConf),
+		dialer:     netx.NewDialer(nConf),
+		tlsDialer:  netx.NewTLSDialer(nConf),
+		quicDialer: netx.NewQUICDialer(nConf),
 	}
 }
 
@@ -235,7 +235,7 @@ func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname stri
 		NextProtos: []string{"h3"},
 	}
 	qcfg := &quic.Config{}
-	qsess, err := m.QUICDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
+	qsess, err := m.quicDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +248,7 @@ func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname str
 		ServerName: hostname,
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-	handshaker := m.TLSDialer.(*netxlite.TLSDialer).TLSHandshaker
+	handshaker := m.tlsDialer.(*netxlite.TLSDialer).TLSHandshaker
 	tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
 	if err != nil {
 		return nil, err
@@ -272,7 +272,7 @@ func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{},
 }
 
 func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
-	return m.Dialer.DialContext(ctx, "tcp", addr)
+	return m.dialer.DialContext(ctx, "tcp", addr)
 }
 
 // Run implements ExperimentMeasurer.Run.
