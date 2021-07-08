@@ -24,22 +24,14 @@ import (
 )
 
 // Config contains the experiment config.
-type Config struct {
-	dialer     netx.Dialer
-	tlsDialer  netx.TLSDialer
-	quicDialer netx.QUICDialer
-}
+type Config struct{}
 
 // Measurer performs the measurement.
 type Measurer struct {
-	Config Config
-}
-
-func (m *Measurer) Init() {
-	conf := netx.Config{}
-	m.Config.dialer = netx.NewDialer(conf)
-	m.Config.tlsDialer = netx.NewTLSDialer(conf)
-	m.Config.quicDialer = netx.NewQUICDialer(conf)
+	Config     Config
+	Dialer     netx.Dialer
+	TLSDialer  netx.TLSDialer
+	QUICDialer netx.QUICDialer
 }
 
 // TestKeys contains webconnectivity test keys.
@@ -77,7 +69,13 @@ type TestKeys struct {
 
 // NewExperimentMeasurer creates a new ExperimentMeasurer.
 func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
-	return &Measurer{Config: config}
+	nConf := netx.Config{}
+	return &Measurer{
+		Config:     config,
+		Dialer:     netx.NewDialer(nConf),
+		TLSDialer:  netx.NewTLSDialer(nConf),
+		QUICDialer: netx.NewQUICDialer(nConf),
+	}
 }
 
 // ExperimentName implements ExperimentMeasurer.ExperExperimentName.
@@ -117,8 +115,6 @@ func (m *Measurer) Run(
 		return m.Run(ctx, sess, measurement, callbacks)
 	}
 
-	m.Init()
-
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -140,7 +136,7 @@ func (m *Measurer) Run(
 		// TODO discard ipv6?
 
 		// Dial connect
-		conn, err := m.Config.dialer.DialContext(ctx, "tcp", ip)
+		conn, err := m.Dialer.DialContext(ctx, "tcp", ip)
 		if err != nil {
 			continue
 		}
@@ -156,7 +152,7 @@ func (m *Measurer) Run(
 				NextProtos: []string{"h2", "http/1.1"},
 			}
 			// Handshake
-			handshaker := m.Config.tlsDialer.(*netxlite.TLSDialer).TLSHandshaker
+			handshaker := m.TLSDialer.(*netxlite.TLSDialer).TLSHandshaker
 			tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
 			if err != nil {
 				continue
@@ -205,7 +201,7 @@ func (m *Measurer) Run(
 			}
 			qcfg := &quic.Config{}
 			// Dial QUIC
-			qsess, err := m.Config.quicDialer.DialContext(ctx, "udp", ip, tlscfg, qcfg)
+			qsess, err := m.QUICDialer.DialContext(ctx, "udp", ip, tlscfg, qcfg)
 			if err != nil {
 				continue
 			}
