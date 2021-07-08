@@ -145,7 +145,7 @@ func (m *Measurer) Run(
 		var transport http.RoundTripper
 		switch URL.Scheme {
 		case "http":
-			transport = getHTTP1Transport(conn)
+			transport = m.getHTTP1Transport(conn)
 		case "https":
 			config := &tls.Config{
 				ServerName: URL.Hostname(),
@@ -162,16 +162,16 @@ func (m *Measurer) Run(
 			switch state.NegotiatedProtocol {
 			case "h2":
 				// HTTP 2 + TLS.
-				transport = getHTTP2Transport(tlsconn, config)
+				transport = m.getHTTP2Transport(tlsconn, config)
 			default:
 				// assume HTTP 1.x + TLS.
-				transport = getHTTP1Transport(conn)
+				transport = m.getHTTP1Transport(conn)
 			}
 		default:
 			return errors.New("invalid scheme")
 		}
 		// Roundtrip
-		req := getRequest(ctx, URL)
+		req := m.getRequest(ctx, URL)
 
 		jar, err := cookiejar.New(nil)
 		runtimex.PanicOnError(err, "cookiejar.New failed")
@@ -232,7 +232,7 @@ func (m *Measurer) Run(
 
 }
 
-func getHTTP1Transport(conn net.Conn) *http.Transport {
+func (m *Measurer) getHTTP1Transport(conn net.Conn) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
 	transport.Dial = func(network string, addr string) (net.Conn, error) {
@@ -241,7 +241,7 @@ func getHTTP1Transport(conn net.Conn) *http.Transport {
 	return transport
 }
 
-func getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
+func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
 	transport := &http2.Transport{
 		DialTLS: func(network string, addr string, cfg *tls.Config) (net.Conn, error) {
 			return conn, nil
@@ -252,7 +252,7 @@ func getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
 	return transport
 }
 
-func getRequest(ctx context.Context, URL *url.URL) *http.Request {
+func (m *Measurer) getRequest(ctx context.Context, URL *url.URL) *http.Request {
 	req, err := http.NewRequest("GET", URL.String(), nil)
 	runtimex.PanicOnError(err, "http.NewRequest failed")
 	req = req.WithContext(ctx)
