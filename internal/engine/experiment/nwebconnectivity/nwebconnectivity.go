@@ -266,6 +266,16 @@ func (m *Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
+	return m.runWithRedirect(ctx, sess, measurement, callbacks, 0)
+}
+
+func (m *Measurer) runWithRedirect(
+	ctx context.Context,
+	sess model.ExperimentSession,
+	measurement *model.Measurement,
+	callbacks model.ExperimentCallbacks,
+	nRedirects int,
+) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -297,9 +307,12 @@ func (m *Measurer) Run(
 
 	resp := <-redirects
 	if resp != nil {
+		if nRedirects == 10 {
+			return errors.New("stopped after 10 redirects")
+		}
 		loc, _ := resp.Location()
 		measurement.Input = model.MeasurementTarget(loc.String())
-		return m.Run(ctx, sess, measurement, callbacks)
+		return m.runWithRedirect(ctx, sess, measurement, callbacks, nRedirects+1)
 	}
 	return nil
 
