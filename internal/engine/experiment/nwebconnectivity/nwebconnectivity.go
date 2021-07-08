@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
@@ -31,7 +32,7 @@ type Config struct{}
 type Measurer struct {
 	Config     Config
 	dialer     netx.Dialer
-	tlsDialer  netx.TLSDialer
+	handshaker netxlite.TLSHandshaker
 	quicDialer netx.QUICDialer
 }
 
@@ -74,9 +75,13 @@ func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
 	return &Measurer{
 		Config:     config,
 		dialer:     netx.NewDialer(nConf),
-		tlsDialer:  netx.NewTLSDialer(nConf),
+		handshaker: newHandshaker(),
 		quicDialer: netx.NewQUICDialer(nConf),
 	}
+}
+
+func newHandshaker() netxlite.TLSHandshaker {
+	return &errorsx.ErrorWrapperTLSHandshaker{TLSHandshaker: &netxlite.TLSHandshakerConfigurable{}}
 }
 
 // ExperimentName implements ExperimentMeasurer.ExperExperimentName.
@@ -178,7 +183,7 @@ func (m *Measurer) measure(
 	var transport http.RoundTripper
 	switch URL.Scheme {
 	case "http":
-		transport = m.getHTTP1Transport(conn)
+		transport = netxlite.NewHTTPTransport(&singleDialerHTTP1{conn: &conn}, nil, nil)
 	case "https":
 		// Handshake
 		transport, err = m.tlsHandshake(ctx, conn, URL.Hostname())
@@ -260,8 +265,7 @@ func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname str
 		ServerName: hostname,
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-	handshaker := m.tlsDialer.(*netxlite.TLSDialer).TLSHandshaker
-	tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
+	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
 	if err != nil {
 		return nil, err
 	}
@@ -310,23 +314,17 @@ func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{},
 		return m.getHTTP2Transport(connsess.(net.Conn), config)
 	default:
 		// assume HTTP 1.x + TLS.
-		return m.getHTTP1Transport(connsess.(net.Conn))
+		dialer := &singleDialerHTTP1{conn: connsess.(*net.Conn)}
+		return netxlite.NewHTTPTransport(dialer, config, m.handshaker)
 	}
 }
-
-func (m *Measurer) getHTTP1Transport(conn net.Conn) *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DisableCompression = true
-	transport.Dial = (&singleDialerHTTP1{conn: &conn}).getConn
-	return transport
-}
-
-func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) *http2.Transport {
-	transport := &http2.Transport{
-		DialTLS:            (&singleDialerH2{conn: &conn}).getTLSConn,
+func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
+	transport = &http2.Transport{
+		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
 		TLSClientConfig:    config,
 		DisableCompression: true,
 	}
+	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http2.Transport)}
 	return transport
 }
 
@@ -335,7 +333,7 @@ func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config
 		DisableCompression: true,
 		TLSClientConfig:    tlscfg,
 		QuicConfig:         qcfg,
-		Dial:               (&singleDialerH3{qsess: &qsess}).getQUICSess,
+		Dial:               (&singleDialerH3{qsess: &qsess}).Dial,
 	}
 	return transport
 }

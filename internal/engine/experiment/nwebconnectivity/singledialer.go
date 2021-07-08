@@ -1,6 +1,7 @@
 package nwebconnectivity
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -14,7 +15,7 @@ type singleDialerHTTP1 struct {
 	conn *net.Conn
 }
 
-func (s *singleDialerHTTP1) getConn(network string, addr string) (net.Conn, error) {
+func (s *singleDialerHTTP1) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
@@ -30,7 +31,7 @@ type singleDialerH2 struct {
 	conn *net.Conn
 }
 
-func (s *singleDialerH2) getTLSConn(network string, addr string, cfg *tls.Config) (net.Conn, error) {
+func (s *singleDialerH2) DialTLS(network string, addr string, cfg *tls.Config) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
@@ -46,7 +47,7 @@ type singleDialerH3 struct {
 	qsess *quic.EarlySession
 }
 
-func (s *singleDialerH3) getQUICSess(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
+func (s *singleDialerH3) Dial(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.qsess == nil {
