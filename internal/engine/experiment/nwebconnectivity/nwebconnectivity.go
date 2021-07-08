@@ -77,16 +77,16 @@ type TestKeys struct {
 
 // NewExperimentMeasurer creates a new ExperimentMeasurer.
 func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
-	return Measurer{Config: config}
+	return &Measurer{Config: config}
 }
 
 // ExperimentName implements ExperimentMeasurer.ExperExperimentName.
-func (m Measurer) ExperimentName() string {
+func (m *Measurer) ExperimentName() string {
 	return "new_webconnectivity"
 }
 
 // ExperimentVersion implements ExperimentMeasurer.ExperExperimentVersion.
-func (m Measurer) ExperimentVersion() string {
+func (m *Measurer) ExperimentVersion() string {
 	return "0.1.0"
 }
 
@@ -105,7 +105,7 @@ var (
 )
 
 // Run implements ExperimentMeasurer.Run.
-func (m Measurer) Run(
+func (m *Measurer) Run(
 	ctx context.Context,
 	sess model.ExperimentSession,
 	measurement *model.Measurement,
@@ -277,7 +277,7 @@ type SummaryKeys struct {
 }
 
 // GetSummaryKeys implements model.ExperimentMeasurer.GetSummaryKeys.
-func (m Measurer) GetSummaryKeys(measurement *model.Measurement) (interface{}, error) {
+func (m *Measurer) GetSummaryKeys(measurement *model.Measurement) (interface{}, error) {
 	sk := SummaryKeys{IsAnomaly: false}
 	return sk, nil
 }
