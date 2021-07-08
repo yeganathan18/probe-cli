@@ -164,29 +164,25 @@ func (m *Measurer) measure(
 		return errors.New("invalid scheme")
 	}
 
-	// // roundtrip
-	resp, err := m.httpRoundtrip(ctx, URL, transport)
+	// HTTP roundtrip
+	resp, err := m.httpRoundtrip(ctx, URL, transport, redirects)
 	if err != nil {
 		fmt.Println(err)
 		return err
-	}
-	switch resp.StatusCode {
-	case 301, 302, 303, 307, 308:
-		redirects <- resp
-		return errors.New("redirect")
 	}
 	fmt.Println("HTTP response", resp.StatusCode)
 
+	// QUIC handshake
 	transport, err = m.quicHandshake(ctx, addr, URL.Hostname())
-	resp, err = m.httpRoundtrip(ctx, URL, transport)
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
-	switch resp.StatusCode {
-	case 301, 302, 303, 307, 308:
-		redirects <- resp
-		return errors.New("redirect QUIC")
+	// HTTP/3 roundtrip
+	resp, err = m.httpRoundtrip(ctx, URL, transport, redirects)
+	if err != nil {
+		fmt.Println(err)
+		return err
 	}
 	fmt.Println("HTTP/3 response", resp.StatusCode)
 
@@ -194,7 +190,7 @@ func (m *Measurer) measure(
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper) (*http.Response, error) {
+func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) (*http.Response, error) {
 	req := m.getRequest(ctx, URL)
 	jar, err := cookiejar.New(nil)
 	runtimex.PanicOnError(err, "cookiejar.New failed")
@@ -206,7 +202,15 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 		return http.ErrUseLastResponse
 	}
 	defer httpClient.CloseIdleConnections()
-	return httpClient.Do(req)
+	resp, err := httpClient.Do(req)
+	if resp != nil {
+		switch resp.StatusCode {
+		case 301, 302, 303, 307, 308:
+			redirects <- resp
+			return nil, errors.New("redirect QUIC")
+		}
+	}
+	return resp, err
 }
 
 func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname string) (http.RoundTripper, error) {
