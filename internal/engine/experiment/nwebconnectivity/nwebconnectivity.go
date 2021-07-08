@@ -14,11 +14,11 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
-	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
 	"golang.org/x/net/http2"
@@ -131,10 +131,11 @@ func (m *Measurer) runWithRedirect(
 		return ErrUnsupportedInput
 	}
 	// 1. perform DNS lookup
-	dnsResult := webconnectivity.DNSLookup(ctx, webconnectivity.DNSLookupConfig{
-		Begin:   measurement.MeasurementStartTimeSaved,
-		Session: sess, URL: URL})
-	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
+	addresses, err := m.dnsLookup(ctx, URL.Hostname())
+	if err != nil {
+		return err
+	}
+	epnts := m.getEndpoints(addresses, URL.Scheme)
 
 	var wg sync.WaitGroup
 	fmt.Println(URL, len(epnts))
@@ -188,6 +189,7 @@ func (m *Measurer) measure(
 			return err
 		}
 	default:
+		// This should not occur because we handle it before. But the check makes the function more robust.
 		return errors.New("invalid scheme")
 	}
 
@@ -271,6 +273,32 @@ func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname str
 // connect performs the TCP three way handshake
 func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
 	return m.dialer.DialContext(ctx, "tcp", addr)
+}
+
+// dnsLookup finds the IP address(es) associated with a domain name
+func (m *Measurer) dnsLookup(ctx context.Context, hostname string) (addrs []string, err error) {
+	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
+	return resolver.LookupHost(ctx, hostname)
+}
+
+// getEndpoints connects IP addresses with the port associated with the URL scheme
+func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
+	out := []string{}
+	if scheme != "http" && scheme != "https" {
+		panic("passed an unexpected scheme")
+	}
+	for _, a := range addrs {
+		var port string
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+		endpoint := net.JoinHostPort(a, port)
+		out = append(out, endpoint)
+	}
+	return out
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
