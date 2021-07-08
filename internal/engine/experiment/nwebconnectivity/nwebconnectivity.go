@@ -112,7 +112,6 @@ func (m Measurer) Run(
 	callbacks model.ExperimentCallbacks,
 ) error {
 	handleRedirect := func(resp *http.Response) error {
-		fmt.Println("redirect")
 		loc, _ := resp.Location()
 		measurement.Input = model.MeasurementTarget(loc.String())
 		return m.Run(ctx, sess, measurement, callbacks)
@@ -143,7 +142,6 @@ func (m Measurer) Run(
 		// Dial connect
 		conn, err := m.Config.dialer.DialContext(ctx, "tcp", ip)
 		if err != nil {
-			fmt.Println("dial failure", err)
 			continue
 		}
 		// TODO(wrap error)
@@ -158,11 +156,9 @@ func (m Measurer) Run(
 				NextProtos: []string{"h2", "http/1.1"},
 			}
 			// Handshake
-			// TODO: fill netx.Config
 			handshaker := m.Config.tlsDialer.(*netxlite.TLSDialer).TLSHandshaker
 			tlsconn, state, err := handshaker.Handshake(ctx, conn, config)
 			if err != nil {
-				fmt.Println("TLS handshake failure", err)
 				continue
 			}
 			// TODO(wrap error)
@@ -193,7 +189,6 @@ func (m Measurer) Run(
 		defer httpClient.CloseIdleConnections()
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			fmt.Println("HTTP failure", err, resp)
 			continue
 		}
 		switch resp.StatusCode {
@@ -212,7 +207,6 @@ func (m Measurer) Run(
 			// Dial QUIC
 			qsess, err := m.Config.quicDialer.DialContext(ctx, "udp", ip, tlscfg, qcfg)
 			if err != nil {
-				fmt.Println("quic dial failure", err)
 				continue
 			}
 			// HTTP/3 Roundtrip
@@ -227,7 +221,6 @@ func (m Measurer) Run(
 			httpClient.Transport = transport
 			resp, err := httpClient.Do(req)
 			if err != nil {
-				fmt.Println("HTTP/3 failure", err)
 				continue
 			}
 			switch resp.StatusCode {
