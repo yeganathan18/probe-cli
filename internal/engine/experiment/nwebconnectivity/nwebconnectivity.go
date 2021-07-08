@@ -43,12 +43,12 @@ type singleDialerHTTP1 struct {
 func (s *singleDialerHTTP1) getConn(network string, addr string) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
-	if s.conn != nil {
-		c := s.conn
-		s.conn = nil
-		return *c, nil
+	if s.conn == nil {
+		return nil, errors.New("cannot reuse connection")
 	}
-	return nil, errors.New("cannot reuse connection")
+	c := s.conn
+	s.conn = nil
+	return *c, nil
 }
 
 type singleDialerH2 struct {
@@ -59,12 +59,12 @@ type singleDialerH2 struct {
 func (s *singleDialerH2) getTLSConn(network string, addr string, cfg *tls.Config) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
-	if s.conn != nil {
-		c := s.conn
-		s.conn = nil
-		return *c, nil
+	if s.conn == nil {
+		return nil, errors.New("cannot reuse connection")
 	}
-	return nil, errors.New("cannot reuse connection")
+	c := s.conn
+	s.conn = nil
+	return *c, nil
 }
 
 type singleDialerH3 struct {
@@ -75,12 +75,12 @@ type singleDialerH3 struct {
 func (s *singleDialerH3) getQUICSess(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
 	s.Lock()
 	defer s.Unlock()
-	if s.qsess != nil {
-		qs := s.qsess
-		s.qsess = nil
-		return *qs, nil
+	if s.qsess == nil {
+		return nil, errors.New("cannot reuse session")
 	}
-	return nil, errors.New("cannot reuse session")
+	qs := s.qsess
+	s.qsess = nil
+	return *qs, nil
 }
 
 // TestKeys contains webconnectivity test keys.
