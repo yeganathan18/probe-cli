@@ -35,54 +35,6 @@ type Measurer struct {
 	quicDialer netx.QUICDialer
 }
 
-type singleDialerHTTP1 struct {
-	sync.Mutex
-	conn *net.Conn
-}
-
-func (s *singleDialerHTTP1) getConn(network string, addr string) (net.Conn, error) {
-	s.Lock()
-	defer s.Unlock()
-	if s.conn == nil {
-		return nil, errors.New("cannot reuse connection")
-	}
-	c := s.conn
-	s.conn = nil
-	return *c, nil
-}
-
-type singleDialerH2 struct {
-	sync.Mutex
-	conn *net.Conn
-}
-
-func (s *singleDialerH2) getTLSConn(network string, addr string, cfg *tls.Config) (net.Conn, error) {
-	s.Lock()
-	defer s.Unlock()
-	if s.conn == nil {
-		return nil, errors.New("cannot reuse connection")
-	}
-	c := s.conn
-	s.conn = nil
-	return *c, nil
-}
-
-type singleDialerH3 struct {
-	sync.Mutex
-	qsess *quic.EarlySession
-}
-
-func (s *singleDialerH3) getQUICSess(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
-	s.Lock()
-	defer s.Unlock()
-	if s.qsess == nil {
-		return nil, errors.New("cannot reuse session")
-	}
-	qs := s.qsess
-	s.qsess = nil
-	return *qs, nil
-}
-
 // TestKeys contains webconnectivity test keys.
 type TestKeys struct {
 	Agent          string  `json:"agent"`
@@ -150,6 +102,65 @@ var (
 	// ErrUnsupportedInput indicates that the input URL scheme is unsupported.
 	ErrUnsupportedInput = errors.New("unsupported input scheme")
 )
+
+// Run implements ExperimentMeasurer.Run.
+func (m *Measurer) Run(
+	ctx context.Context,
+	sess model.ExperimentSession,
+	measurement *model.Measurement,
+	callbacks model.ExperimentCallbacks,
+) error {
+	return m.runWithRedirect(ctx, sess, measurement, callbacks, 0)
+}
+
+func (m *Measurer) runWithRedirect(
+	ctx context.Context,
+	sess model.ExperimentSession,
+	measurement *model.Measurement,
+	callbacks model.ExperimentCallbacks,
+	nRedirects int,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	URL, err := url.Parse(string(measurement.Input))
+	if err != nil {
+		return ErrInputIsNotAnURL
+	}
+	if URL.Scheme != "http" && URL.Scheme != "https" {
+		return ErrUnsupportedInput
+	}
+	// 1. perform DNS lookup
+	dnsResult := webconnectivity.DNSLookup(ctx, webconnectivity.DNSLookupConfig{
+		Begin:   measurement.MeasurementStartTimeSaved,
+		Session: sess, URL: URL})
+	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
+
+	var wg sync.WaitGroup
+	fmt.Println(URL, len(epnts))
+	redirects := make(chan *http.Response, len(epnts)+1)
+
+	// 2. each IP address
+	for _, ip := range epnts {
+		// TODO discard ipv6?
+		wg.Add(1)
+		go m.measure(ctx, ip, URL, &wg, redirects)
+	}
+	wg.Wait()
+	redirects <- nil
+
+	resp := <-redirects
+	if resp != nil {
+		if nRedirects == 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		loc, _ := resp.Location()
+		measurement.Input = model.MeasurementTarget(loc.String())
+		return m.runWithRedirect(ctx, sess, measurement, callbacks, nRedirects+1)
+	}
+	return nil
+
+}
 
 func (m *Measurer) measure(
 	ctx context.Context,
@@ -229,6 +240,7 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 	return resp, err
 }
 
+// quicHandshake performs the QUIC handshake
 func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname string) (http.RoundTripper, error) {
 	tlscfg := &tls.Config{
 		ServerName: hostname,
@@ -256,6 +268,11 @@ func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname str
 	return m.getTransport(state, tlsconn, config), nil
 }
 
+// connect performs the TCP three way handshake
+func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
+	return m.dialer.DialContext(ctx, "tcp", addr)
+}
+
 // getTransport determines the appropriate HTTP Transport from the ALPN
 func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{}, config *tls.Config) http.RoundTripper {
 	// ALPN ?
@@ -269,69 +286,6 @@ func (m *Measurer) getTransport(state tls.ConnectionState, connsess interface{},
 		// assume HTTP 1.x + TLS.
 		return m.getHTTP1Transport(connsess.(net.Conn))
 	}
-}
-
-func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
-	return m.dialer.DialContext(ctx, "tcp", addr)
-}
-
-// Run implements ExperimentMeasurer.Run.
-func (m *Measurer) Run(
-	ctx context.Context,
-	sess model.ExperimentSession,
-	measurement *model.Measurement,
-	callbacks model.ExperimentCallbacks,
-) error {
-	return m.runWithRedirect(ctx, sess, measurement, callbacks, 0)
-}
-
-func (m *Measurer) runWithRedirect(
-	ctx context.Context,
-	sess model.ExperimentSession,
-	measurement *model.Measurement,
-	callbacks model.ExperimentCallbacks,
-	nRedirects int,
-) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	URL, err := url.Parse(string(measurement.Input))
-	if err != nil {
-		return ErrInputIsNotAnURL
-	}
-	if URL.Scheme != "http" && URL.Scheme != "https" {
-		return ErrUnsupportedInput
-	}
-	// 1. perform DNS lookup
-	dnsResult := webconnectivity.DNSLookup(ctx, webconnectivity.DNSLookupConfig{
-		Begin:   measurement.MeasurementStartTimeSaved,
-		Session: sess, URL: URL})
-	epnts := webconnectivity.NewEndpoints(URL, dnsResult.Addresses()).Endpoints()
-
-	var wg sync.WaitGroup
-	fmt.Println(URL, len(epnts))
-	redirects := make(chan *http.Response, len(epnts)+1)
-
-	// 2. each IP address
-	for _, ip := range epnts {
-		// TODO discard ipv6?
-		wg.Add(1)
-		go m.measure(ctx, ip, URL, &wg, redirects)
-	}
-	wg.Wait()
-	redirects <- nil
-
-	resp := <-redirects
-	if resp != nil {
-		if nRedirects == 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		loc, _ := resp.Location()
-		measurement.Input = model.MeasurementTarget(loc.String())
-		return m.runWithRedirect(ctx, sess, measurement, callbacks, nRedirects+1)
-	}
-	return nil
-
 }
 
 func (m *Measurer) getHTTP1Transport(conn net.Conn) *http.Transport {
