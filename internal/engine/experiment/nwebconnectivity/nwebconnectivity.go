@@ -250,12 +250,13 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 	}
 	defer httpClient.CloseIdleConnections()
 	resp, err := httpClient.Do(req)
-	if resp != nil {
-		switch resp.StatusCode {
-		case 301, 302, 303, 307, 308:
-			redirects <- resp
-			return nil, errors.New("redirect")
-		}
+	if resp == nil {
+		return nil, err
+	}
+	switch resp.StatusCode {
+	case 301, 302, 303, 307, 308:
+		redirects <- resp
+		return nil, errors.New("redirect")
 	}
 	return resp, err
 }
