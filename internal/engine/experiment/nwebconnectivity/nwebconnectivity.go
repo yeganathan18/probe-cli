@@ -17,7 +17,6 @@ import (
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
-	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
@@ -31,9 +30,10 @@ type Config struct{}
 // Measurer performs the measurement.
 type Measurer struct {
 	Config     Config
-	dialer     netx.Dialer
+	dialer     netxlite.Dialer
 	handshaker netxlite.TLSHandshaker
-	quicDialer netx.QUICDialer
+	logger     netxlite.Logger
+	quicDialer netxlite.QUICContextDialer
 }
 
 // TestKeys contains webconnectivity test keys.
@@ -71,17 +71,32 @@ type TestKeys struct {
 
 // NewExperimentMeasurer creates a new ExperimentMeasurer.
 func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
-	nConf := netx.Config{}
+	logger := log.Log
 	return &Measurer{
 		Config:     config,
-		dialer:     netx.NewDialer(nConf),
+		dialer:     newDialer(logger),
 		handshaker: newHandshaker(),
-		quicDialer: netx.NewQUICDialer(nConf),
+		logger:     logger,
+		quicDialer: newQUICDialer(logger),
 	}
 }
 
 func newHandshaker() netxlite.TLSHandshaker {
 	return &errorsx.ErrorWrapperTLSHandshaker{TLSHandshaker: &netxlite.TLSHandshakerConfigurable{}}
+}
+
+func newDialer(logger netxlite.Logger) netxlite.Dialer {
+	var d netxlite.Dialer
+	d = &errorsx.ErrorWrapperDialer{Dialer: netxlite.DefaultDialer}
+	d = &netxlite.DialerLogger{Dialer: d, Logger: logger}
+	return d
+}
+
+func newQUICDialer(logger netxlite.Logger) netxlite.QUICContextDialer {
+	ql := &errorsx.ErrorWrapperQUICListener{QUICListener: &netxlite.QUICListenerStdlib{}}
+	var d netxlite.QUICContextDialer = &netxlite.QUICDialerQUICGo{QUICListener: ql}
+	d = &errorsx.ErrorWrapperQUICDialer{Dialer: d}
+	return d
 }
 
 // ExperimentName implements ExperimentMeasurer.ExperExperimentName.
