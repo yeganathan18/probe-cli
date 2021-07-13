@@ -225,6 +225,9 @@ func (m *Measurer) measure(
 	defer wg.Done()
 	// connect
 	conn := m.connect(measurement, ctx, addr)
+	if conn == nil {
+		return nil
+	}
 	var transport http.RoundTripper
 	switch URL.Scheme {
 	case "http":
@@ -232,15 +235,19 @@ func (m *Measurer) measure(
 	case "https":
 		// Handshake
 		transport = m.tlsHandshake(measurement, ctx, conn, URL.Hostname())
-	default:
-		// This should not occur because we handle it before. But the check makes the function more robust.
-		return errors.New("invalid scheme")
 	}
+	if transport == nil {
+		return nil
+	}
+
 	// HTTP roundtrip
 	m.httpRoundtrip(ctx, URL, transport, redirects)
 
 	// QUIC handshake
 	transport = m.quicHandshake(measurement, ctx, addr, URL.Hostname())
+	if transport == nil {
+		return nil
+	}
 	// HTTP/3 roundtrip
 	m.httpRoundtrip(ctx, URL, transport, redirects)
 
