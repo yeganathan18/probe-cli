@@ -3,21 +3,26 @@ package nwebconnectivity
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/apex/log"
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
+	"github.com/ooni/probe-cli/v3/internal/engine/geolocate"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx/trace"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
@@ -130,14 +135,17 @@ func (m *Measurer) Run(
 	measurement *model.Measurement,
 	callbacks model.ExperimentCallbacks,
 ) error {
+	tk := new(TestKeys)
+	measurement.TestKeys = tk
 	URL, err := url.Parse(string(measurement.Input))
 	if err != nil {
 		return ErrInputIsNotAnURL
 	}
-	return m.runWithRedirect(ctx, URL, 0)
+	return m.runWithRedirect(measurement, ctx, URL, 0)
 }
 
 func (m *Measurer) runWithRedirect(
+	measurement *model.Measurement,
 	ctx context.Context,
 	URL *url.URL,
 	nRedirects int,
@@ -150,10 +158,7 @@ func (m *Measurer) runWithRedirect(
 	}
 
 	// 1. perform DNS lookup
-	addresses, err := m.dnsLookup(ctx, URL.Hostname())
-	if err != nil {
-		return err
-	}
+	addresses := m.dnsLookup(measurement, ctx, URL.Hostname())
 	epnts := m.getEndpoints(addresses, URL.Scheme)
 
 	var wg sync.WaitGroup
@@ -164,7 +169,7 @@ func (m *Measurer) runWithRedirect(
 	for _, ip := range epnts {
 		// TODO discard ipv6?
 		wg.Add(1)
-		go m.measure(ctx, ip, URL, &wg, redirects)
+		go m.measure(measurement, ctx, ip, URL, &wg, redirects)
 	}
 	wg.Wait()
 	redirects <- nil
@@ -175,13 +180,14 @@ func (m *Measurer) runWithRedirect(
 			return errors.New("stopped after 10 redirects")
 		}
 		loc, _ := resp.Location()
-		return m.runWithRedirect(ctx, loc, nRedirects+1)
+		return m.runWithRedirect(measurement, ctx, loc, nRedirects+1)
 	}
 	return nil
 
 }
 
 func (m *Measurer) measure(
+	measurement *model.Measurement,
 	ctx context.Context,
 	addr string,
 	URL *url.URL,
@@ -190,54 +196,32 @@ func (m *Measurer) measure(
 ) error {
 	defer wg.Done()
 	// connect
-	conn, err := m.connect(ctx, addr)
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
+	conn := m.connect(measurement, ctx, addr)
 	var transport http.RoundTripper
 	switch URL.Scheme {
 	case "http":
 		transport = netxlite.NewHTTPTransport(&singleDialerHTTP1{conn: &conn}, nil, nil)
 	case "https":
 		// Handshake
-		transport, err = m.tlsHandshake(ctx, conn, URL.Hostname())
-		if err != nil {
-			fmt.Println(err)
-			return err
-		}
+		transport = m.tlsHandshake(measurement, ctx, conn, URL.Hostname())
 	default:
 		// This should not occur because we handle it before. But the check makes the function more robust.
 		return errors.New("invalid scheme")
 	}
 
 	// HTTP roundtrip
-	resp, err := m.httpRoundtrip(ctx, URL, transport, redirects)
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-	fmt.Println("HTTP response", resp.StatusCode)
+	m.httpRoundtrip(ctx, URL, transport, redirects)
 
 	// QUIC handshake
-	transport, err = m.quicHandshake(ctx, addr, URL.Hostname())
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
+	transport = m.quicHandshake(measurement, ctx, addr, URL.Hostname())
 	// HTTP/3 roundtrip
-	resp, err = m.httpRoundtrip(ctx, URL, transport, redirects)
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-	fmt.Println("HTTP/3 response", resp.StatusCode)
+	m.httpRoundtrip(ctx, URL, transport, redirects)
 
 	return nil
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) (*http.Response, error) {
+func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) {
 	req := m.getRequest(ctx, URL)
 	jar, err := cookiejar.New(nil)
 	runtimex.PanicOnError(err, "cookiejar.New failed")
@@ -251,52 +235,158 @@ func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport ht
 	defer httpClient.CloseIdleConnections()
 	resp, err := httpClient.Do(req)
 	if resp == nil {
-		return nil, err
+		return
 	}
 	switch resp.StatusCode {
 	case 301, 302, 303, 307, 308:
 		redirects <- resp
-		return nil, errors.New("redirect")
 	}
-	return resp, err
 }
 
 // quicHandshake performs the QUIC handshake
-func (m *Measurer) quicHandshake(ctx context.Context, addr string, hostname string) (http.RoundTripper, error) {
+func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Context, addr string, hostname string) http.RoundTripper {
 	tlscfg := &tls.Config{
 		ServerName: hostname,
 		NextProtos: []string{"h3"},
 	}
 	qcfg := &quic.Config{}
 	qsess, err := m.quicDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
+	stop := time.Now()
 	if err != nil {
-		return nil, err
+		entry := archival.TLSHandshake{
+			Failure:     archival.NewFailure(err),
+			NoTLSVerify: tlscfg.InsecureSkipVerify,
+			ServerName:  tlscfg.ServerName,
+			T:           stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		}
+		tk := measurement.TestKeys.(*TestKeys)
+		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+		return nil
 	}
-	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
+	state := qsess.ConnectionState().TLS.ConnectionState
+	entry := archival.TLSHandshake{
+		CipherSuite:        netxlite.TLSCipherSuiteString(state.CipherSuite),
+		Failure:            archival.NewFailure(err),
+		NegotiatedProtocol: state.NegotiatedProtocol,
+		NoTLSVerify:        tlscfg.InsecureSkipVerify,
+		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
+		ServerName:         tlscfg.ServerName,
+		TLSVersion:         netxlite.TLSVersionString(state.Version),
+		T:                  stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+	}
+	tk := measurement.TestKeys.(*TestKeys)
+	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{})
 }
 
 // tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(ctx context.Context, conn net.Conn, hostname string) (http.RoundTripper, error) {
+func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Context, conn net.Conn, hostname string) http.RoundTripper {
 	config := &tls.Config{
 		ServerName: hostname,
 		NextProtos: []string{"h2", "http/1.1"},
 	}
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
+	stop := time.Now()
+
 	if err != nil {
-		return nil, err
+		entry := archival.TLSHandshake{
+			Failure:     archival.NewFailure(err),
+			NoTLSVerify: config.InsecureSkipVerify,
+			ServerName:  config.ServerName,
+			T:           stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		}
+		tk := measurement.TestKeys.(*TestKeys)
+		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+		return nil
 	}
-	return m.getTransport(state, tlsconn, config), nil
+	entry := archival.TLSHandshake{
+		CipherSuite:        netxlite.TLSCipherSuiteString(state.CipherSuite),
+		Failure:            archival.NewFailure(err),
+		NegotiatedProtocol: state.NegotiatedProtocol,
+		NoTLSVerify:        config.InsecureSkipVerify,
+		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
+		ServerName:         config.ServerName,
+		TLSVersion:         netxlite.TLSVersionString(state.Version),
+		T:                  stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+	}
+	tk := measurement.TestKeys.(*TestKeys)
+	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	return m.getTransport(state, tlsconn, config)
 }
 
 // connect performs the TCP three way handshake
-func (m *Measurer) connect(ctx context.Context, addr string) (net.Conn, error) {
-	return m.dialer.DialContext(ctx, "tcp", addr)
+func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) net.Conn {
+	conn, err := m.dialer.DialContext(ctx, "tcp", addr)
+	stop := time.Now()
+
+	a, sport, _ := net.SplitHostPort(addr)
+	iport, _ := strconv.Atoi(sport)
+	entry := archival.TCPConnectEntry{
+		IP:   a,
+		Port: iport,
+		Status: archival.TCPConnectStatus{
+			Failure: archival.NewFailure(err),
+			Success: err == nil,
+		},
+		T: stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+	}
+	tk := measurement.TestKeys.(*TestKeys)
+	tk.TCPConnect = append(tk.TCPConnect, entry)
+	return conn
 }
 
+type dnsQueryType string
+
 // dnsLookup finds the IP address(es) associated with a domain name
-func (m *Measurer) dnsLookup(ctx context.Context, hostname string) (addrs []string, err error) {
+func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context, hostname string) []string {
 	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
-	return resolver.LookupHost(ctx, hostname)
+	addrs, err := resolver.LookupHost(ctx, hostname)
+	stop := time.Now()
+	tk := measurement.TestKeys.(*TestKeys)
+	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
+		entry := archival.DNSQueryEntry{
+			Engine:          resolver.Network(),
+			Failure:         archival.NewFailure(err),
+			Hostname:        hostname,
+			QueryType:       string(qtype),
+			ResolverAddress: resolver.Address(),
+			T:               stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		}
+		for _, addr := range addrs {
+			if qtype.ipoftype(addr) {
+				entry.Answers = append(entry.Answers, qtype.makeanswerentry(addr))
+			}
+		}
+		if len(entry.Answers) <= 0 && err == nil {
+			continue
+		}
+		tk.Queries = append(tk.Queries, entry)
+	}
+	return addrs
+}
+
+func (qtype dnsQueryType) ipoftype(addr string) bool {
+	switch qtype {
+	case "A":
+		return !strings.Contains(addr, ":")
+	case "AAAA":
+		return strings.Contains(addr, ":")
+	}
+	return false
+}
+
+func (qtype dnsQueryType) makeanswerentry(addr string) archival.DNSAnswerEntry {
+	answer := archival.DNSAnswerEntry{AnswerType: string(qtype)}
+	asn, org, _ := geolocate.LookupASN(addr)
+	answer.ASN = int64(asn)
+	answer.ASOrgName = org
+	switch qtype {
+	case "A":
+		answer.IPv4 = addr
+	case "AAAA":
+		answer.IPv6 = addr
+	}
+	return answer
 }
 
 // getEndpoints connects IP addresses with the port associated with the URL scheme
@@ -317,6 +407,13 @@ func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
 		out = append(out, endpoint)
 	}
 	return out
+}
+
+func makePeerCerts(in []*x509.Certificate) (out []archival.MaybeBinaryValue) {
+	for _, e := range in {
+		out = append(out, archival.MaybeBinaryValue{Value: string(e.Raw)})
+	}
+	return
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
