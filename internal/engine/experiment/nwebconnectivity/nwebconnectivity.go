@@ -186,6 +186,34 @@ func (m *Measurer) runWithRedirect(
 
 }
 
+// dnsLookup finds the IP address(es) associated with a domain name
+func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context, hostname string) []string {
+	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
+	addrs, err := resolver.LookupHost(ctx, hostname)
+	stop := time.Now()
+	tk := measurement.TestKeys.(*TestKeys)
+	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
+		entry := archival.DNSQueryEntry{
+			Engine:          resolver.Network(),
+			Failure:         archival.NewFailure(err),
+			Hostname:        hostname,
+			QueryType:       string(qtype),
+			ResolverAddress: resolver.Address(),
+			T:               stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		}
+		for _, addr := range addrs {
+			if qtype.ipoftype(addr) {
+				entry.Answers = append(entry.Answers, qtype.makeanswerentry(addr))
+			}
+		}
+		if len(entry.Answers) <= 0 && err == nil {
+			continue
+		}
+		tk.Queries = append(tk.Queries, entry)
+	}
+	return addrs
+}
+
 func (m *Measurer) measure(
 	measurement *model.Measurement,
 	ctx context.Context,
@@ -208,7 +236,6 @@ func (m *Measurer) measure(
 		// This should not occur because we handle it before. But the check makes the function more robust.
 		return errors.New("invalid scheme")
 	}
-
 	// HTTP roundtrip
 	m.httpRoundtrip(ctx, URL, transport, redirects)
 
@@ -220,27 +247,25 @@ func (m *Measurer) measure(
 	return nil
 }
 
-// httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) {
-	req := m.getRequest(ctx, URL)
-	jar, err := cookiejar.New(nil)
-	runtimex.PanicOnError(err, "cookiejar.New failed")
-	httpClient := &http.Client{
-		Jar:       jar,
-		Transport: transport,
+// connect performs the TCP three way handshake
+func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) net.Conn {
+	conn, err := m.dialer.DialContext(ctx, "tcp", addr)
+	stop := time.Now()
+
+	a, sport, _ := net.SplitHostPort(addr)
+	iport, _ := strconv.Atoi(sport)
+	entry := archival.TCPConnectEntry{
+		IP:   a,
+		Port: iport,
+		Status: archival.TCPConnectStatus{
+			Failure: archival.NewFailure(err),
+			Success: err == nil,
+		},
+		T: stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
 	}
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	defer httpClient.CloseIdleConnections()
-	resp, err := httpClient.Do(req)
-	if resp == nil {
-		return
-	}
-	switch resp.StatusCode {
-	case 301, 302, 303, 307, 308:
-		redirects <- resp
-	}
+	tk := measurement.TestKeys.(*TestKeys)
+	tk.TCPConnect = append(tk.TCPConnect, entry)
+	return conn
 }
 
 // quicHandshake performs the QUIC handshake
@@ -314,56 +339,99 @@ func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Cont
 	return m.getTransport(state, tlsconn, config)
 }
 
-// connect performs the TCP three way handshake
-func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) net.Conn {
-	conn, err := m.dialer.DialContext(ctx, "tcp", addr)
-	stop := time.Now()
-
-	a, sport, _ := net.SplitHostPort(addr)
-	iport, _ := strconv.Atoi(sport)
-	entry := archival.TCPConnectEntry{
-		IP:   a,
-		Port: iport,
-		Status: archival.TCPConnectStatus{
-			Failure: archival.NewFailure(err),
-			Success: err == nil,
-		},
-		T: stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+// httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
+func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) {
+	req := m.getRequest(ctx, URL)
+	jar, err := cookiejar.New(nil)
+	runtimex.PanicOnError(err, "cookiejar.New failed")
+	httpClient := &http.Client{
+		Jar:       jar,
+		Transport: transport,
 	}
-	tk := measurement.TestKeys.(*TestKeys)
-	tk.TCPConnect = append(tk.TCPConnect, entry)
-	return conn
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer httpClient.CloseIdleConnections()
+	resp, err := httpClient.Do(req)
+	if resp == nil {
+		return
+	}
+	switch resp.StatusCode {
+	case 301, 302, 303, 307, 308:
+		redirects <- resp
+	}
 }
 
+// getEndpoints connects IP addresses with the port associated with the URL scheme
+func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
+	out := []string{}
+	if scheme != "http" && scheme != "https" {
+		panic("passed an unexpected scheme")
+	}
+	for _, a := range addrs {
+		var port string
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+		endpoint := net.JoinHostPort(a, port)
+		out = append(out, endpoint)
+	}
+	return out
+}
+
+// getTransport determines the appropriate HTTP Transport from the ALPN
+func (m *Measurer) getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
+	// ALPN ?
+	switch state.NegotiatedProtocol {
+	case "h2":
+		// HTTP 2 + TLS.
+		return m.getHTTP2Transport(conn, config)
+	default:
+		// assume HTTP 1.x + TLS.
+		dialer := &singleDialerHTTP1{conn: &conn}
+		return netxlite.NewHTTPTransport(dialer, config, m.handshaker)
+	}
+}
+
+// getHTTP3Transport creates am http2.Transport
+func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
+	transport = &http2.Transport{
+		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
+		TLSClientConfig:    config,
+		DisableCompression: true,
+	}
+	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http2.Transport)}
+	return transport
+}
+
+// getHTTP3Transport creates am http3.RoundTripper
+func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config, qcfg *quic.Config) *http3.RoundTripper {
+	transport := &http3.RoundTripper{
+		DisableCompression: true,
+		TLSClientConfig:    tlscfg,
+		QuicConfig:         qcfg,
+		Dial:               (&singleDialerH3{qsess: &qsess}).Dial,
+	}
+	return transport
+}
+
+// getRequest gives us a new HTTP GET request
+func (m *Measurer) getRequest(ctx context.Context, URL *url.URL) *http.Request {
+	req, err := http.NewRequest("GET", URL.String(), nil)
+	runtimex.PanicOnError(err, "http.NewRequest failed")
+	req = req.WithContext(ctx)
+	req.Header.Set("Accept", httpheader.Accept())
+	req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
+	req.Host = URL.Hostname()
+	return req
+}
+
+// TODO(kelmenhorst): this part is stolen from archival.
+// decide: make archival functions public or repeat ourselves?
 type dnsQueryType string
-
-// dnsLookup finds the IP address(es) associated with a domain name
-func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context, hostname string) []string {
-	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
-	addrs, err := resolver.LookupHost(ctx, hostname)
-	stop := time.Now()
-	tk := measurement.TestKeys.(*TestKeys)
-	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
-		entry := archival.DNSQueryEntry{
-			Engine:          resolver.Network(),
-			Failure:         archival.NewFailure(err),
-			Hostname:        hostname,
-			QueryType:       string(qtype),
-			ResolverAddress: resolver.Address(),
-			T:               stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
-		}
-		for _, addr := range addrs {
-			if qtype.ipoftype(addr) {
-				entry.Answers = append(entry.Answers, qtype.makeanswerentry(addr))
-			}
-		}
-		if len(entry.Answers) <= 0 && err == nil {
-			continue
-		}
-		tk.Queries = append(tk.Queries, entry)
-	}
-	return addrs
-}
 
 func (qtype dnsQueryType) ipoftype(addr string) bool {
 	switch qtype {
@@ -389,74 +457,11 @@ func (qtype dnsQueryType) makeanswerentry(addr string) archival.DNSAnswerEntry {
 	return answer
 }
 
-// getEndpoints connects IP addresses with the port associated with the URL scheme
-func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
-	out := []string{}
-	if scheme != "http" && scheme != "https" {
-		panic("passed an unexpected scheme")
-	}
-	for _, a := range addrs {
-		var port string
-		switch scheme {
-		case "http":
-			port = "80"
-		case "https":
-			port = "443"
-		}
-		endpoint := net.JoinHostPort(a, port)
-		out = append(out, endpoint)
-	}
-	return out
-}
-
 func makePeerCerts(in []*x509.Certificate) (out []archival.MaybeBinaryValue) {
 	for _, e := range in {
 		out = append(out, archival.MaybeBinaryValue{Value: string(e.Raw)})
 	}
 	return
-}
-
-// getTransport determines the appropriate HTTP Transport from the ALPN
-func (m *Measurer) getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
-	// ALPN ?
-	switch state.NegotiatedProtocol {
-	case "h2":
-		// HTTP 2 + TLS.
-		return m.getHTTP2Transport(conn, config)
-	default:
-		// assume HTTP 1.x + TLS.
-		dialer := &singleDialerHTTP1{conn: &conn}
-		return netxlite.NewHTTPTransport(dialer, config, m.handshaker)
-	}
-}
-func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
-	transport = &http2.Transport{
-		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
-		TLSClientConfig:    config,
-		DisableCompression: true,
-	}
-	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http2.Transport)}
-	return transport
-}
-
-func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config, qcfg *quic.Config) *http3.RoundTripper {
-	transport := &http3.RoundTripper{
-		DisableCompression: true,
-		TLSClientConfig:    tlscfg,
-		QuicConfig:         qcfg,
-		Dial:               (&singleDialerH3{qsess: &qsess}).Dial,
-	}
-	return transport
-}
-
-func (m *Measurer) getRequest(ctx context.Context, URL *url.URL) *http.Request {
-	req, err := http.NewRequest("GET", URL.String(), nil)
-	runtimex.PanicOnError(err, "http.NewRequest failed")
-	req = req.WithContext(ctx)
-	req.Header.Set("Accept", httpheader.Accept())
-	req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
-	req.Host = URL.Hostname()
-	return req
 }
 
 // SummaryKeys contains summary keys for this experiment.
