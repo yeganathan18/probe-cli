@@ -43,6 +43,7 @@ type Measurer struct {
 
 // TestKeys contains webconnectivity test keys.
 type TestKeys struct {
+	sync.Mutex
 	Agent          string  `json:"agent"`
 	ClientResolver string  `json:"client_resolver"`
 	Retries        *int64  `json:"retries"`    // unused
@@ -128,6 +129,13 @@ var (
 	ErrUnsupportedInput = errors.New("unsupported input scheme")
 )
 
+type MeasurementSession struct {
+	experimentSession model.ExperimentSession
+	jar               http.CookieJar
+	measurement       *model.Measurement
+	URL               *url.URL
+}
+
 // Run implements ExperimentMeasurer.Run.
 func (m *Measurer) Run(
 	ctx context.Context,
@@ -141,35 +149,46 @@ func (m *Measurer) Run(
 	if err != nil {
 		return ErrInputIsNotAnURL
 	}
-	return m.runWithRedirect(measurement, ctx, URL, 0)
+	// create session
+	jar, err := cookiejar.New(nil)
+	runtimex.PanicOnError(err, "cookiejar.New failed")
+	session := &MeasurementSession{
+		experimentSession: sess,
+		jar:               jar,
+		measurement:       measurement,
+		URL:               URL,
+	}
+	return m.runWithRedirect(session, ctx, 0)
 }
 
 func (m *Measurer) runWithRedirect(
-	measurement *model.Measurement,
+	sess *MeasurementSession,
 	ctx context.Context,
-	URL *url.URL,
 	nRedirects int,
 ) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	if URL.Scheme != "http" && URL.Scheme != "https" {
+	if sess.URL.Scheme != "http" && sess.URL.Scheme != "https" {
 		return ErrUnsupportedInput
 	}
 
 	// 1. perform DNS lookup
-	addresses := m.dnsLookup(measurement, ctx, URL.Hostname())
-	epnts := m.getEndpoints(addresses, URL.Scheme)
+	addresses := m.dnsLookup(sess, ctx)
+	if len(addresses) == 0 {
+		return nil
+	}
+	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 
 	var wg sync.WaitGroup
-	fmt.Println(URL, len(epnts))
+	fmt.Println(sess.URL, len(epnts))
 	redirects := make(chan *http.Response, len(epnts)+1)
-
 	// 2. each IP address
 	for _, ip := range epnts {
 		// TODO discard ipv6?
 		wg.Add(1)
-		go m.measure(measurement, ctx, ip, URL, &wg, redirects)
+		go m.measure(sess, ctx, ip, &wg, redirects)
+		// TODO: perform the control measurement
 	}
 	wg.Wait()
 	redirects <- nil
@@ -180,18 +199,25 @@ func (m *Measurer) runWithRedirect(
 			return errors.New("stopped after 10 redirects")
 		}
 		loc, _ := resp.Location()
-		return m.runWithRedirect(measurement, ctx, loc, nRedirects+1)
+		session := &MeasurementSession{
+			experimentSession: sess.experimentSession,
+			jar:               sess.jar,
+			measurement:       sess.measurement,
+			URL:               loc,
+		}
+		return m.runWithRedirect(session, ctx, nRedirects+1)
 	}
 	return nil
 
 }
 
 // dnsLookup finds the IP address(es) associated with a domain name
-func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context, hostname string) []string {
+func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []string {
 	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
+	hostname := sess.URL.Hostname()
 	addrs, err := resolver.LookupHost(ctx, hostname)
 	stop := time.Now()
-	tk := measurement.TestKeys.(*TestKeys)
+	tk := sess.measurement.TestKeys.(*TestKeys)
 	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
 		entry := archival.DNSQueryEntry{
 			Engine:          resolver.Network(),
@@ -199,7 +225,7 @@ func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context
 			Hostname:        hostname,
 			QueryType:       string(qtype),
 			ResolverAddress: resolver.Address(),
-			T:               stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+			T:               stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
 		}
 		for _, addr := range addrs {
 			if qtype.ipoftype(addr) {
@@ -209,47 +235,49 @@ func (m *Measurer) dnsLookup(measurement *model.Measurement, ctx context.Context
 		if len(entry.Answers) <= 0 && err == nil {
 			continue
 		}
+		tk.Lock()
 		tk.Queries = append(tk.Queries, entry)
+		tk.Unlock()
 	}
+	tk.DNSExperimentFailure = archival.NewFailure(err)
 	return addrs
 }
 
 func (m *Measurer) measure(
-	measurement *model.Measurement,
+	sess *MeasurementSession,
 	ctx context.Context,
 	addr string,
-	URL *url.URL,
 	wg *sync.WaitGroup,
 	redirects chan *http.Response,
 ) error {
 	defer wg.Done()
 	// connect
-	conn := m.connect(measurement, ctx, addr)
+	conn := m.connect(sess.measurement, ctx, addr)
 	if conn == nil {
 		return nil
 	}
 	var transport http.RoundTripper
-	switch URL.Scheme {
+	switch sess.URL.Scheme {
 	case "http":
 		transport = netxlite.NewHTTPTransport(&singleDialerHTTP1{conn: &conn}, nil, nil)
 	case "https":
 		// Handshake
-		transport = m.tlsHandshake(measurement, ctx, conn, URL.Hostname())
+		transport = m.tlsHandshake(sess, ctx, conn)
 	}
 	if transport == nil {
 		return nil
 	}
 
 	// HTTP roundtrip
-	m.httpRoundtrip(ctx, URL, transport, redirects)
+	m.httpRoundtrip(sess, ctx, transport, redirects)
 
 	// QUIC handshake
-	transport = m.quicHandshake(measurement, ctx, addr, URL.Hostname())
+	transport = m.quicHandshake(sess, ctx, addr)
 	if transport == nil {
 		return nil
 	}
 	// HTTP/3 roundtrip
-	m.httpRoundtrip(ctx, URL, transport, redirects)
+	m.httpRoundtrip(sess, ctx, transport, redirects)
 
 	return nil
 }
@@ -271,14 +299,16 @@ func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, 
 		T: stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
 	}
 	tk := measurement.TestKeys.(*TestKeys)
+	tk.Lock()
 	tk.TCPConnect = append(tk.TCPConnect, entry)
+	tk.Unlock()
 	return conn
 }
 
 // quicHandshake performs the QUIC handshake
-func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Context, addr string, hostname string) http.RoundTripper {
+func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, addr string) http.RoundTripper {
 	tlscfg := &tls.Config{
-		ServerName: hostname,
+		ServerName: sess.URL.Hostname(),
 		NextProtos: []string{"h3"},
 	}
 	qcfg := &quic.Config{}
@@ -289,10 +319,12 @@ func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Con
 			Failure:     archival.NewFailure(err),
 			NoTLSVerify: tlscfg.InsecureSkipVerify,
 			ServerName:  tlscfg.ServerName,
-			T:           stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
 		}
-		tk := measurement.TestKeys.(*TestKeys)
+		tk := sess.measurement.TestKeys.(*TestKeys)
+		tk.Lock()
 		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+		tk.Unlock()
 		return nil
 	}
 	state := qsess.ConnectionState().TLS.ConnectionState
@@ -304,17 +336,19 @@ func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Con
 		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
 		ServerName:         tlscfg.ServerName,
 		TLSVersion:         netxlite.TLSVersionString(state.Version),
-		T:                  stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
 	}
-	tk := measurement.TestKeys.(*TestKeys)
+	tk := sess.measurement.TestKeys.(*TestKeys)
+	tk.Lock()
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	tk.Unlock()
 	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{})
 }
 
 // tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Context, conn net.Conn, hostname string) http.RoundTripper {
+func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn) http.RoundTripper {
 	config := &tls.Config{
-		ServerName: hostname,
+		ServerName: sess.URL.Hostname(),
 		NextProtos: []string{"h2", "http/1.1"},
 	}
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
@@ -325,10 +359,12 @@ func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Cont
 			Failure:     archival.NewFailure(err),
 			NoTLSVerify: config.InsecureSkipVerify,
 			ServerName:  config.ServerName,
-			T:           stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
 		}
-		tk := measurement.TestKeys.(*TestKeys)
+		tk := sess.measurement.TestKeys.(*TestKeys)
+		tk.Lock()
 		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+		tk.Unlock()
 		return nil
 	}
 	entry := archival.TLSHandshake{
@@ -339,27 +375,27 @@ func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Cont
 		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
 		ServerName:         config.ServerName,
 		TLSVersion:         netxlite.TLSVersionString(state.Version),
-		T:                  stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
+		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
 	}
-	tk := measurement.TestKeys.(*TestKeys)
+	tk := sess.measurement.TestKeys.(*TestKeys)
+	tk.Lock()
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	tk.Unlock()
 	return m.getTransport(state, tlsconn, config)
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(ctx context.Context, URL *url.URL, transport http.RoundTripper, redirects chan *http.Response) {
-	req := m.getRequest(ctx, URL)
-	jar, err := cookiejar.New(nil)
-	runtimex.PanicOnError(err, "cookiejar.New failed")
+func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *http.Response) {
+	req := m.getRequest(ctx, sess.URL)
 	httpClient := &http.Client{
-		Jar:       jar,
+		Jar:       sess.jar,
 		Transport: transport,
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	defer httpClient.CloseIdleConnections()
-	resp, err := httpClient.Do(req)
+	resp, _ := httpClient.Do(req)
 	if resp == nil {
 		return
 	}
