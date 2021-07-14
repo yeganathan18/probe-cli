@@ -8,6 +8,7 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/engine"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
+	"github.com/ooni/probe-cli/v3/internal/errorsx"
 )
 
 func TestNewExperimentMeasurer(t *testing.T) {
@@ -69,4 +70,34 @@ func newsession(t *testing.T, lookupBackends bool) model.ExperimentSession {
 		t.Fatal(err)
 	}
 	return sess
+}
+
+func TestMeasureWithCancelledContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately fail
+	// we need a real session because we need the web-connectivity helper
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "https://ooni.com"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	if err := measurer.Run(ctx, sess, measurement, callbacks); err != nil {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if *tk.DNSExperimentFailure != errorsx.FailureInterrupted {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+	sk, err := measurer.GetSummaryKeys(measurement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sk.(nwebconnectivity.SummaryKeys); !ok {
+		t.Fatal("invalid type for summary keys")
+	}
 }
