@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -181,7 +180,6 @@ func (m *Measurer) runWithRedirect(
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 
 	var wg sync.WaitGroup
-	fmt.Println(sess.URL, len(epnts))
 	redirects := make(chan *http.Response, len(epnts)+1)
 	// 2. each IP address
 	for _, ip := range epnts {
@@ -194,8 +192,11 @@ func (m *Measurer) runWithRedirect(
 	redirects <- nil
 
 	resp := <-redirects
+	// we only follow one redirect request here, assuming that we get the same redirect location from every endpoint that belongs to the domain
+	// we assume this so that the number of requests does not exponentially grow with every redirect
 	if resp != nil {
 		if nRedirects == 10 {
+			// we stop after 10 redirects
 			return errors.New("stopped after 10 redirects")
 		}
 		loc, _ := resp.Location()
