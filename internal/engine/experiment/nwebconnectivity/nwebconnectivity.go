@@ -25,6 +25,7 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
+	"github.com/ooni/psiphon/oopsi/golang.org/x/net/idna"
 	"golang.org/x/net/http2"
 )
 
@@ -130,7 +131,7 @@ var (
 
 type MeasurementSession struct {
 	experimentSession model.ExperimentSession
-	jar               http.CookieJar
+	jar               *cookiejar.Jar
 	measurement       *model.Measurement
 	URL               *url.URL
 }
@@ -172,18 +173,19 @@ func (m *Measurer) runWithRedirect(
 		return ErrUnsupportedInput
 	}
 
-	// 1. perform DNS lookup
+	// perform DNS lookup
 	addresses := m.dnsLookup(sess, ctx)
 	if len(addresses) == 0 {
 		return nil
 	}
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
+	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
 	var wg sync.WaitGroup
 	redirects := make(chan *http.Response, len(epnts)+1)
-	// 2. each IP address
+
+	// for each IP address
 	for _, ip := range epnts {
-		// TODO discard ipv6?
 		wg.Add(1)
 		go m.measure(sess, ctx, ip, &wg, redirects)
 		// TODO: perform the control measurement
@@ -214,11 +216,16 @@ func (m *Measurer) runWithRedirect(
 
 // dnsLookup finds the IP address(es) associated with a domain name
 func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []string {
+	tk := sess.measurement.TestKeys.(*TestKeys)
 	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
 	hostname := sess.URL.Hostname()
-	addrs, err := resolver.LookupHost(ctx, hostname)
+	idnaHost, err := idna.ToASCII(hostname)
+	if err != nil {
+		tk.DNSExperimentFailure = archival.NewFailure(err)
+		return nil
+	}
+	addrs, err := resolver.LookupHost(ctx, idnaHost)
 	stop := time.Now()
-	tk := sess.measurement.TestKeys.(*TestKeys)
 	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
 		entry := archival.DNSQueryEntry{
 			Engine:          resolver.Network(),
@@ -402,6 +409,7 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 	}
 	switch resp.StatusCode {
 	case 301, 302, 303, 307, 308:
+		resp.Body.Close()
 		redirects <- resp
 	}
 }
