@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -133,7 +134,13 @@ type MeasurementSession struct {
 	experimentSession model.ExperimentSession
 	jar               *cookiejar.Jar
 	measurement       *model.Measurement
+	redirectedReq     *http.Request
 	URL               *url.URL
+}
+
+type redirectInfo struct {
+	location *url.URL
+	req      *http.Request
 }
 
 // Run implements ExperimentMeasurer.Run.
@@ -182,7 +189,7 @@ func (m *Measurer) runWithRedirect(
 	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
 	var wg sync.WaitGroup
-	redirects := make(chan *http.Response, len(epnts)+1)
+	redirects := make(chan *redirectInfo, len(epnts)+1)
 
 	// for each IP address
 	for _, ip := range epnts {
@@ -193,20 +200,20 @@ func (m *Measurer) runWithRedirect(
 	wg.Wait()
 	redirects <- nil
 
-	resp := <-redirects
+	rdrct := <-redirects
 	// we only follow one redirect request here, assuming that we get the same redirect location from every endpoint that belongs to the domain
 	// we assume this so that the number of requests does not exponentially grow with every redirect
-	if resp != nil {
+	if rdrct != nil {
 		if nRedirects == 10 {
 			// we stop after 10 redirects
 			return errors.New("stopped after 10 redirects")
 		}
-		loc, _ := resp.Location()
 		session := &MeasurementSession{
 			experimentSession: sess.experimentSession,
 			jar:               sess.jar,
 			measurement:       sess.measurement,
-			URL:               loc,
+			redirectedReq:     rdrct.req,
+			URL:               rdrct.location,
 		}
 		return m.runWithRedirect(session, ctx, nRedirects+1)
 	}
@@ -256,7 +263,7 @@ func (m *Measurer) measure(
 	ctx context.Context,
 	addr string,
 	wg *sync.WaitGroup,
-	redirects chan *http.Response,
+	redirects chan *redirectInfo,
 ) error {
 	defer wg.Done()
 	// connect
@@ -393,8 +400,11 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *http.Response) {
-	req := m.getRequest(ctx, sess.URL)
+func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) {
+	req := sess.redirectedReq
+	if req == nil {
+		req = m.getRequest(ctx, sess.URL, "GET", nil)
+	}
 	httpClient := &http.Client{
 		Jar:       sess.jar,
 		Transport: transport,
@@ -407,11 +417,42 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 	if resp == nil {
 		return
 	}
-	switch resp.StatusCode {
-	case 301, 302, 303, 307, 308:
-		resp.Body.Close()
-		redirects <- resp
+	shouldRedirect, includeBody, location := m.redirectBehavior(resp, req)
+	if shouldRedirect {
+		var reqBody io.ReadCloser = nil
+		reqMethod := "GET"
+		if includeBody {
+			// we created the request with http.NewRequest so we know that the GetBody function will not return an error
+			reqBody, _ = req.GetBody()
+			reqMethod = req.Method
+		}
+		redReq := m.getRequest(ctx, location, reqMethod, reqBody)
+		redirects <- &redirectInfo{location: location, req: redReq}
 	}
+}
+
+func (m *Measurer) redirectBehavior(resp *http.Response, req *http.Request) (shouldRedirect, includeBody bool, location *url.URL) {
+	switch resp.StatusCode {
+	case 301, 302, 303:
+		shouldRedirect = true
+		includeBody = false
+		location, _ = resp.Location()
+	case 307, 308:
+		shouldRedirect = true
+		includeBody = true
+		var err error
+		// 308s have been observed in the wild being served
+		// without Location headers.
+		location, err = resp.Location()
+		if err != nil {
+			shouldRedirect = false
+			break
+		}
+		if req.GetBody == nil {
+			shouldRedirect = false
+		}
+	}
+	return shouldRedirect, includeBody, location
 }
 
 // getEndpoints connects IP addresses with the port associated with the URL scheme
@@ -471,13 +512,16 @@ func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config
 }
 
 // getRequest gives us a new HTTP GET request
-func (m *Measurer) getRequest(ctx context.Context, URL *url.URL) *http.Request {
-	req, err := http.NewRequest("GET", URL.String(), nil)
+func (m *Measurer) getRequest(ctx context.Context, URL *url.URL, method string, body io.ReadCloser) *http.Request {
+	req, err := http.NewRequest(method, URL.String(), nil)
 	runtimex.PanicOnError(err, "http.NewRequest failed")
 	req = req.WithContext(ctx)
 	req.Header.Set("Accept", httpheader.Accept())
 	req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
 	req.Host = URL.Hostname()
+	if body != nil {
+		req.Body = body
+	}
 	return req
 }
 
