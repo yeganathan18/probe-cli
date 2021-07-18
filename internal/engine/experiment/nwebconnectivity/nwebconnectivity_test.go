@@ -248,3 +248,28 @@ func Test308RedirectWithoutLocationHeader(t *testing.T) {
 		t.Fatal("unexpected http_experiment_failure")
 	}
 }
+
+func TestIDNARedirect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx := context.Background()
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "http://яндекс.рф"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+}
