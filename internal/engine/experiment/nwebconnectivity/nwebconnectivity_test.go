@@ -49,33 +49,6 @@ func TestSuccess(t *testing.T) {
 	}
 }
 
-func TestSuccessWithRedirects(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip test in short mode")
-	}
-	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
-	ctx := context.Background()
-	// we need a real session because we need the web-connectivity helper
-	// as well as the ASN database
-	sess := newsession(t, true)
-	measurement := &model.Measurement{Input: "http://яндекс.рф"}
-	callbacks := model.NewPrinterCallbacks(log.Log)
-	err := measurer.Run(ctx, sess, measurement, callbacks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
-	if tk.ControlFailure != nil {
-		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
-	}
-	if tk.HTTPExperimentFailure != nil {
-		t.Fatal("unexpected http_experiment_failure")
-	}
-}
-
 func newsession(t *testing.T, lookupBackends bool) model.ExperimentSession {
 	sess, err := engine.NewSession(context.Background(), engine.SessionConfig{
 		AvailableProbeServices: []model.Service{{
@@ -176,6 +149,92 @@ func TestMeasureWithInputNotBeingAnURL(t *testing.T) {
 	callbacks := model.NewPrinterCallbacks(log.Log)
 	err := measurer.Run(ctx, sess, measurement, callbacks)
 	if !errors.Is(err, nwebconnectivity.ErrInputIsNotAnURL) {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+}
+
+func TestMeasureWithUnsupportedInput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// we need a real session because we need the web-connectivity helper
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "dnslookup://example.com"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if !errors.Is(err, nwebconnectivity.ErrUnsupportedInput) {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+}
+
+func TestTLSHandshakeFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx := context.Background()
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "https://wrong.host.badssl.com/"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+	if len(tk.TLSHandshakes) != 1 {
+		t.Fatal("unexpected number of TLS handshakes")
+	}
+	if tk.TLSHandshakes[0].Failure == nil {
+		t.Fatal("expected a TLS handshake failure")
+	}
+	if *tk.TLSHandshakes[0].Failure != errorsx.FailureSSLInvalidHostname {
+		t.Fatal("unexpected failure type")
+	}
+}
+
+func Test308RedirectWithoutLocationHeader(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx := context.Background()
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "http://test.greenbytes.de/tech/tc/httpredirects/t308empty.asis"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if err != nil {
 		t.Fatal(err)
 	}
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
