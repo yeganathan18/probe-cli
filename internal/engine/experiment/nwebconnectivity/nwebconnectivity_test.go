@@ -30,7 +30,7 @@ func TestSuccess(t *testing.T) {
 	// we need a real session because we need the web-connectivity helper
 	// as well as the ASN database
 	sess := newsession(t, true)
-	measurement := &model.Measurement{Input: "https://ooni.org/"}
+	measurement := &model.Measurement{Input: "https://www.google.com/"}
 	callbacks := model.NewPrinterCallbacks(log.Log)
 	err := measurer.Run(ctx, sess, measurement, callbacks)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestMeasureWithCancelledContext(t *testing.T) {
 	cancel() // immediately fail
 	// we need a real session because we need the web-connectivity helper
 	sess := newsession(t, true)
-	measurement := &model.Measurement{Input: "https://ooni.org/"}
+	measurement := &model.Measurement{Input: "https://www.google.com/"}
 	callbacks := model.NewPrinterCallbacks(log.Log)
 	if err := measurer.Run(ctx, sess, measurement, callbacks); err != nil {
 		t.Fatal(err)
