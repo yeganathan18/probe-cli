@@ -2,6 +2,7 @@ package nwebconnectivity_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/apex/log"
@@ -126,5 +127,57 @@ func TestMeasureWithCancelledContext(t *testing.T) {
 	}
 	if _, ok := sk.(nwebconnectivity.SummaryKeys); !ok {
 		t.Fatal("invalid type for summary keys")
+	}
+}
+
+func TestWithTLSParrots(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	// TODO(kelmenhorst): how can we check that the chrome fingerprint is actually used, without using wireshark traces?
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{ClientHello: "Chrome"})
+	ctx := context.Background()
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "https://www.google.com/"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
+	}
+}
+
+func TestMeasureWithInputNotBeingAnURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip test in short mode")
+	}
+	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess := newsession(t, true)
+	measurement := &model.Measurement{Input: "\t\t\t\t\t\t"}
+	callbacks := model.NewPrinterCallbacks(log.Log)
+	err := measurer.Run(ctx, sess, measurement, callbacks)
+	if !errors.Is(err, nwebconnectivity.ErrInputIsNotAnURL) {
+		t.Fatal(err)
+	}
+	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
+	if tk.ControlFailure != nil {
+		t.Fatal("unexpected control_failure")
+	}
+	if tk.DNSExperimentFailure != nil {
+		t.Fatal("unexpected dns_experiment_failure")
+	}
+	if tk.HTTPExperimentFailure != nil {
+		t.Fatal("unexpected http_experiment_failure")
 	}
 }
