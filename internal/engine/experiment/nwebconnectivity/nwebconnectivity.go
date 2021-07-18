@@ -38,11 +38,12 @@ type Config struct {
 
 // Measurer performs the measurement.
 type Measurer struct {
-	Config     Config
-	dialer     netxlite.Dialer
-	handshaker netxlite.TLSHandshaker
-	logger     netxlite.Logger
-	quicDialer netxlite.QUICContextDialer
+	Config            Config
+	dialer            netxlite.Dialer
+	fingerprintClient string
+	handshaker        netxlite.TLSHandshaker
+	logger            netxlite.Logger
+	quicDialer        netxlite.QUICContextDialer
 }
 
 // TestKeys contains webconnectivity test keys.
@@ -90,12 +91,18 @@ const (
 // NewExperimentMeasurer creates a new ExperimentMeasurer.
 func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
 	logger := log.Log
+	clientHello := getClientHelloID(config.ClientHello)
+	var fingerprintClient string
+	if clientHello != nil {
+		fingerprintClient = clientHello.Client
+	}
 	return &Measurer{
-		Config:     config,
-		dialer:     newDialer(logger),
-		handshaker: newHandshaker(config),
-		logger:     logger,
-		quicDialer: newQUICDialer(logger),
+		Config:            config,
+		dialer:            newDialer(logger),
+		fingerprintClient: fingerprintClient,
+		handshaker:        newHandshaker(config, clientHello),
+		logger:            logger,
+		quicDialer:        newQUICDialer(logger),
 	}
 }
 
@@ -113,12 +120,11 @@ func getClientHelloID(stringHelloID string) (utlsID *utls.ClientHelloID) {
 	return nil
 }
 
-func newHandshaker(config Config) netxlite.TLSHandshaker {
+func newHandshaker(config Config, clientHello *utls.ClientHelloID) netxlite.TLSHandshaker {
 	var h netxlite.TLSHandshaker
 	h = &netxlite.TLSHandshakerConfigurable{}
-	typedClientHello := getClientHelloID(config.ClientHello)
-	if typedClientHello != nil {
-		h.(*netxlite.TLSHandshakerConfigurable).NewConn = netxlite.NewConnUTLS(typedClientHello)
+	if clientHello != nil {
+		h.(*netxlite.TLSHandshakerConfigurable).NewConn = netxlite.NewConnUTLS(clientHello)
 	}
 	h = &errorsx.ErrorWrapperTLSHandshaker{TLSHandshaker: h}
 	return h
@@ -241,7 +247,7 @@ func (m *Measurer) runWithRedirect(
 	// we assume this so that the number of requests does not exponentially grow with every redirect
 	if rdrct != nil {
 		if nRedirects == 10 {
-			// we stop after 10 redirects
+			// we stop after 10 redirects, TODO(kelmenhorst): how do we test this?
 			return errors.New("stopped after 10 redirects")
 		}
 		session := &MeasurementSession{
@@ -410,6 +416,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 	if err != nil {
 		entry := archival.TLSHandshake{
 			Failure:     archival.NewFailure(err),
+			Fingerprint: m.fingerprintClient,
 			NoTLSVerify: config.InsecureSkipVerify,
 			ServerName:  config.ServerName,
 			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
@@ -424,6 +431,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 	entry := archival.TLSHandshake{
 		CipherSuite:        netxlite.TLSCipherSuiteString(state.CipherSuite),
 		Failure:            archival.NewFailure(err),
+		Fingerprint:        m.fingerprintClient,
 		NegotiatedProtocol: state.NegotiatedProtocol,
 		NoTLSVerify:        config.InsecureSkipVerify,
 		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),

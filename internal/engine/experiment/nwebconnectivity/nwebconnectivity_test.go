@@ -134,7 +134,6 @@ func TestWithTLSParrots(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip test in short mode")
 	}
-	// TODO(kelmenhorst): how can we check that the chrome fingerprint is actually used, without using wireshark traces?
 	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{ClientHello: "Chrome"})
 	ctx := context.Background()
 	sess := newsession(t, true)
@@ -153,6 +152,15 @@ func TestWithTLSParrots(t *testing.T) {
 	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
+	}
+	for _, handshake := range tk.TLSHandshakes {
+		// we cannot use utls for h3 yet
+		if handshake.NegotiatedProtocol == "h3" {
+			continue
+		}
+		if handshake.Fingerprint != "Chrome" {
+			t.Fatal("unexpected TLS Client Hello fingerprint")
+		}
 	}
 }
 

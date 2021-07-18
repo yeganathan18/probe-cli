@@ -535,6 +535,7 @@ func NewNetworkEventsList(begin time.Time, events []trace.Event) []NetworkEvent 
 type TLSHandshake struct {
 	CipherSuite        string             `json:"cipher_suite"`
 	Failure            *string            `json:"failure"`
+	Fingerprint        string             `json:"clienthello_fingerprint"`
 	NegotiatedProtocol string             `json:"negotiated_protocol"`
 	NoTLSVerify        bool               `json:"no_tls_verify"`
 	PeerCertificates   []MaybeBinaryValue `json:"peer_certificates"`
