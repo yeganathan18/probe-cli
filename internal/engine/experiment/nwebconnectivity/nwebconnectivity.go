@@ -48,10 +48,8 @@ type Measurer struct {
 // TestKeys contains webconnectivity test keys.
 type TestKeys struct {
 	sync.Mutex
-	Agent          string  `json:"agent"`
-	ClientResolver string  `json:"client_resolver"`
-	Retries        *int64  `json:"retries"`    // unused
-	SOCKSProxy     *string `json:"socksproxy"` // unused
+	Agent          string `json:"agent"`
+	ClientResolver string `json:"client_resolver"`
 
 	// For now mostly TCP/TLS "connect" experiment but we are
 	// considering adding more events. An open question is
@@ -78,6 +76,16 @@ type TestKeys struct {
 	Requests              []archival.RequestEntry `json:"requests"`
 	HTTPExperimentFailure *string                 `json:"http_experiment_failure"`
 }
+
+// Tags describing the section of this experiment in which
+// the data has been collected.
+const (
+	// TCPTLSExperimentTag is a tag indicating the TCP connect experiment.
+	TCPTLSExperimentTag = "tcptls_experiment"
+
+	// QUICTLSExperimentTag is a tag indicating the QUIC handshake experiment.
+	QUICTLSExperimentTag = "quictls_experiment"
+)
 
 // NewExperimentMeasurer creates a new ExperimentMeasurer.
 func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
@@ -176,6 +184,9 @@ func (m *Measurer) Run(
 ) error {
 	tk := new(TestKeys)
 	measurement.TestKeys = tk
+	// TODO(kelmenhorst): what is the specification of the TestKeys Agent? do we need to use "agent" hier?
+	tk.Agent = "redirect"
+	tk.ClientResolver = sess.ResolverIP()
 	URL, err := url.Parse(string(measurement.Input))
 	if err != nil {
 		return ErrInputIsNotAnURL
@@ -360,6 +371,7 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 			NoTLSVerify: tlscfg.InsecureSkipVerify,
 			ServerName:  tlscfg.ServerName,
 			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
+			Tags:        []string{QUICTLSExperimentTag},
 		}
 		tk := sess.measurement.TestKeys.(*TestKeys)
 		tk.Lock()
@@ -377,6 +389,7 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 		ServerName:         tlscfg.ServerName,
 		TLSVersion:         netxlite.TLSVersionString(state.Version),
 		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
+		Tags:               []string{QUICTLSExperimentTag},
 	}
 	tk := sess.measurement.TestKeys.(*TestKeys)
 	tk.Lock()
@@ -400,6 +413,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 			NoTLSVerify: config.InsecureSkipVerify,
 			ServerName:  config.ServerName,
 			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
+			Tags:        []string{TCPTLSExperimentTag},
 		}
 		tk := sess.measurement.TestKeys.(*TestKeys)
 		tk.Lock()
@@ -416,6 +430,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 		ServerName:         config.ServerName,
 		TLSVersion:         netxlite.TLSVersionString(state.Version),
 		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
+		Tags:               []string{TCPTLSExperimentTag},
 	}
 	tk := sess.measurement.TestKeys.(*TestKeys)
 	tk.Lock()
