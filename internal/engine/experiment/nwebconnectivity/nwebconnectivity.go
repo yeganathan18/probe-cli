@@ -27,11 +27,14 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
 	"github.com/ooni/psiphon/oopsi/golang.org/x/net/idna"
+	utls "gitlab.com/yawning/utls.git"
 	"golang.org/x/net/http2"
 )
 
-// Config contains the experiment config.
-type Config struct{}
+// Conig contains the experiment config.
+type Config struct {
+	ClientHello string `ooni:"Use ClientHello of specific client for parroting."`
+}
 
 // Measurer performs the measurement.
 type Measurer struct {
@@ -82,14 +85,35 @@ func NewExperimentMeasurer(config Config) model.ExperimentMeasurer {
 	return &Measurer{
 		Config:     config,
 		dialer:     newDialer(logger),
-		handshaker: newHandshaker(),
+		handshaker: newHandshaker(config),
 		logger:     logger,
 		quicDialer: newQUICDialer(logger),
 	}
 }
 
-func newHandshaker() netxlite.TLSHandshaker {
-	return &errorsx.ErrorWrapperTLSHandshaker{TLSHandshaker: &netxlite.TLSHandshakerConfigurable{}}
+func getClientHelloID(stringHelloID string) (utlsID *utls.ClientHelloID) {
+	switch strings.ToLower(stringHelloID) {
+	case "firefox":
+		return &utls.HelloFirefox_Auto
+	case "chrome":
+		return &utls.HelloChrome_Auto
+	case "ios":
+		return &utls.HelloIOS_Auto
+	case "golang":
+		return &utls.HelloGolang
+	}
+	return nil
+}
+
+func newHandshaker(config Config) netxlite.TLSHandshaker {
+	var h netxlite.TLSHandshaker
+	h = &netxlite.TLSHandshakerConfigurable{}
+	typedClientHello := getClientHelloID(config.ClientHello)
+	if typedClientHello != nil {
+		h.(*netxlite.TLSHandshakerConfigurable).NewConn = netxlite.NewConnUTLS(typedClientHello)
+	}
+	h = &errorsx.ErrorWrapperTLSHandshaker{TLSHandshaker: h}
+	return h
 }
 
 func newDialer(logger netxlite.Logger) netxlite.Dialer {
@@ -189,6 +213,7 @@ func (m *Measurer) runWithRedirect(
 	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
 	var wg sync.WaitGroup
+	// at most we should get a redirect response from each endpoints
 	redirects := make(chan *redirectInfo, len(epnts)+1)
 
 	// for each IP address
