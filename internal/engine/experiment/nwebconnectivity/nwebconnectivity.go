@@ -246,9 +246,9 @@ func (m *Measurer) runWithRedirect(
 	// we only follow one redirect request here, assuming that we get the same redirect location from every endpoint that belongs to the domain
 	// we assume this so that the number of requests does not exponentially grow with every redirect
 	if rdrct != nil {
-		if nRedirects == 10 {
-			// we stop after 10 redirects, TODO(kelmenhorst): how do we test this?
-			return errors.New("stopped after 10 redirects")
+		if nRedirects == 20 {
+			// we stop after 20 redirects, as do Chrome and Firefox, TODO(kelmenhorst): how do we test this?
+			return errors.New("stopped after 20 redirects")
 		}
 		session := &MeasurementSession{
 			experimentSession: sess.experimentSession,
