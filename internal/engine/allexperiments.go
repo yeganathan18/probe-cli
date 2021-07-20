@@ -323,7 +323,7 @@ var experimentsByName = map[string]func(*Session) *ExperimentBuilder{
 				))
 			},
 			config:      &nwebconnectivity.Config{},
-			inputPolicy: InputStrictlyRequired,
+			inputPolicy: InputOrQueryBackend,
 		}
 	},
 
