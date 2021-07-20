@@ -326,8 +326,12 @@ func (m *Measurer) measure(
 	}
 
 	// HTTP roundtrip
-	m.httpRoundtrip(sess, ctx, transport, redirects)
+	h3Support := m.httpRoundtrip(sess, ctx, transport, redirects)
 
+	// stop if h3 is not supported
+	if !h3Support {
+		return nil
+	}
 	// QUIC handshake
 	transport = m.quicHandshake(sess, ctx, addr)
 	if transport == nil {
@@ -448,7 +452,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) {
+func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) (h3 bool) {
 	req := sess.redirectedReq
 	if req == nil {
 		req = m.getRequest(ctx, sess.URL, "GET", nil)
@@ -477,6 +481,20 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 		redReq := m.getRequest(ctx, location, reqMethod, reqBody)
 		redirects <- &redirectInfo{location: location, req: redReq}
 	}
+	return m.discoverH3Server(resp)
+}
+
+// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response
+// to check whether the server announces to support h3
+func (m *Measurer) discoverH3Server(resp *http.Response) (h3 bool) {
+	alt_svc := resp.Header.Get("Alt-Svc")
+	entries := strings.Split(alt_svc, ";")
+	for _, e := range entries {
+		if strings.Contains(e, "h3") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Measurer) redirectBehavior(resp *http.Response, req *http.Request) (shouldRedirect, includeBody bool, location *url.URL) {
