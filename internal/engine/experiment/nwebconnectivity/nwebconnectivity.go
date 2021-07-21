@@ -255,7 +255,6 @@ func (m *Measurer) runWithRedirect(
 	}
 	addresses = mergeAddresses(addresses, tk.Control.DNS.Addrs)
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
-	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
 	var wg sync.WaitGroup
 	// at most we should get a redirect response from each endpoints, for both TCP and QUIC
