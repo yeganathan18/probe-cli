@@ -258,8 +258,8 @@ func (m *Measurer) runWithRedirect(
 	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
 	var wg sync.WaitGroup
-	// at most we should get a redirect response from each endpoints
-	redirects := make(chan *redirectInfo, len(epnts)+1)
+	// at most we should get a redirect response from each endpoints, for both TCP and QUIC
+	redirects := make(chan *redirectInfo, len(epnts)*2+1)
 
 	// for each IP address
 	for _, ip := range epnts {
