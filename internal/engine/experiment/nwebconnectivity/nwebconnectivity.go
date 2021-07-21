@@ -22,7 +22,6 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
-	"github.com/ooni/probe-cli/v3/internal/engine/netx/trace"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
@@ -405,36 +404,15 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 	qcfg := &quic.Config{}
 	qsess, err := m.quicDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
 	stop := time.Now()
-	if err != nil {
-		entry := archival.TLSHandshake{
-			Failure:     archival.NewFailure(err),
-			NoTLSVerify: tlscfg.InsecureSkipVerify,
-			ServerName:  tlscfg.ServerName,
-			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
-			Tags:        []string{QUICTLSExperimentTag},
-		}
-		tk := sess.measurement.TestKeys.(*TestKeys)
-		tk.Lock()
-		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
-		tk.Unlock()
-		return nil
-	}
-	state := qsess.ConnectionState().TLS.ConnectionState
-	entry := archival.TLSHandshake{
-		CipherSuite:        netxlite.TLSCipherSuiteString(state.CipherSuite),
-		Failure:            archival.NewFailure(err),
-		NegotiatedProtocol: state.NegotiatedProtocol,
-		NoTLSVerify:        tlscfg.InsecureSkipVerify,
-		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
-		ServerName:         tlscfg.ServerName,
-		TLSVersion:         netxlite.TLSVersionString(state.Version),
-		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
-		Tags:               []string{QUICTLSExperimentTag},
-	}
+	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag)
+	entry.setQUICHandshakeResult(tlscfg, qsess, err)
 	tk := sess.measurement.TestKeys.(*TestKeys)
 	tk.Lock()
-	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
+	if err != nil {
+		return nil
+	}
 	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{})
 }
 
@@ -447,37 +425,16 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
 	stop := time.Now()
 
-	if err != nil {
-		entry := archival.TLSHandshake{
-			Failure:     archival.NewFailure(err),
-			Fingerprint: m.fingerprintClient,
-			NoTLSVerify: config.InsecureSkipVerify,
-			ServerName:  config.ServerName,
-			T:           stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
-			Tags:        []string{TCPTLSExperimentTag},
-		}
-		tk := sess.measurement.TestKeys.(*TestKeys)
-		tk.Lock()
-		tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
-		tk.Unlock()
-		return nil
-	}
-	entry := archival.TLSHandshake{
-		CipherSuite:        netxlite.TLSCipherSuiteString(state.CipherSuite),
-		Failure:            archival.NewFailure(err),
-		Fingerprint:        m.fingerprintClient,
-		NegotiatedProtocol: state.NegotiatedProtocol,
-		NoTLSVerify:        config.InsecureSkipVerify,
-		PeerCertificates:   makePeerCerts(trace.PeerCerts(state, err)),
-		ServerName:         config.ServerName,
-		TLSVersion:         netxlite.TLSVersionString(state.Version),
-		T:                  stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
-		Tags:               []string{TCPTLSExperimentTag},
-	}
+	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag)
+	entry.setHandshakeResult(config, state, err)
+	entry.Fingerprint = m.fingerprintClient
 	tk := sess.measurement.TestKeys.(*TestKeys)
 	tk.Lock()
-	tk.TLSHandshakes = append(tk.TLSHandshakes, entry)
+	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
+	if err != nil {
+		return nil
+	}
 	return m.getTransport(state, tlsconn, config)
 }
 

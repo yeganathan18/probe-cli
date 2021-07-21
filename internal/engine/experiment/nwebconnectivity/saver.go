@@ -2,14 +2,18 @@ package nwebconnectivity
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx/trace"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/iox"
+	"github.com/ooni/probe-cli/v3/internal/netxlite"
 )
 
 type RequestEntry struct {
@@ -130,4 +134,40 @@ func (e *DNSQueryEntry) setResult(addrs []string, err error, qtype dnsQueryType)
 			e.Answers = append(e.Answers, qtype.makeanswerentry(addr))
 		}
 	}
+}
+
+type TLSHandshake struct {
+	archival.TLSHandshake
+}
+
+func makeTLSHandshakeEntry(begin time.Time, stop time.Time, protoTag string) *TLSHandshake {
+	return &TLSHandshake{archival.TLSHandshake{
+		T:    stop.Sub(begin).Seconds(),
+		Tags: []string{protoTag},
+	}}
+}
+
+func (e *TLSHandshake) setQUICHandshakeResult(tlscfg *tls.Config, qsess quic.EarlySession, err error) {
+	state := tls.ConnectionState{}
+	if err == nil {
+		state = qsess.ConnectionState().TLS.ConnectionState
+	}
+	e.setHandshakeResult(tlscfg, state, err)
+}
+
+func (e *TLSHandshake) setHandshakeResult(tlscfg *tls.Config, state tls.ConnectionState, err error) {
+	e.Failure = archival.NewFailure(err)
+	e.NoTLSVerify = tlscfg.InsecureSkipVerify
+	e.ServerName = tlscfg.ServerName
+	if err != nil {
+		return
+	}
+	e.setHandshakeSuccess(tlscfg, state)
+}
+
+func (e *TLSHandshake) setHandshakeSuccess(tlscfg *tls.Config, state tls.ConnectionState) {
+	e.CipherSuite = netxlite.TLSCipherSuiteString(state.CipherSuite)
+	e.NegotiatedProtocol = state.NegotiatedProtocol
+	e.PeerCertificates = makePeerCerts(trace.PeerCerts(state, nil))
+	e.TLSVersion = netxlite.TLSVersionString(state.Version)
 }
