@@ -66,7 +66,9 @@ type TestKeys struct {
 	DNSExperimentFailure *string                  `json:"dns_experiment_failure"`
 
 	// Control experiment
-	ControlFailure *string `json:"control_failure"`
+	ControlFailure *string         `json:"control_failure"`
+	ControlRequest ControlRequest  `json:"-"`
+	Control        ControlResponse `json:"control"`
 
 	// TCP/TLS "connect" experiment
 	TCPConnect          []archival.TCPConnectEntry `json:"tcp_connect"`
@@ -226,6 +228,32 @@ func (m *Measurer) runWithRedirect(
 	if len(addresses) == 0 {
 		return nil
 	}
+
+	// control
+	testhelper := findTestHelper(sess.experimentSession)
+	if testhelper == nil {
+		return ErrNoAvailableTestHelpers
+	}
+	sess.measurement.TestHelpers = map[string]interface{}{
+		"backend": testhelper,
+	}
+	tk := sess.measurement.TestKeys.(*TestKeys)
+	var err error
+	tk.Control, err = Control(ctx, sess.experimentSession, testhelper.Address, ControlRequest{
+		HTTPRequest: sess.URL.String(),
+		HTTPRequestHeaders: map[string][]string{
+			"Accept":          {httpheader.Accept()},
+			"Accept-Language": {httpheader.AcceptLanguage()},
+			"User-Agent":      {httpheader.UserAgent()},
+		},
+		// let the testhelper do the DNS resolve step (the size of the slice is arbitrary)
+		TCPConnect: make([]string, 1),
+	})
+	// TODO(kelmenhorst): what to do in case of error?
+	if err != nil {
+		return nil
+	}
+	addresses = mergeAddresses(addresses, tk.Control.DNS.Addrs)
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 	// TODO: perform dns lookup on testhelper and create union of the returned ip addresses
 
@@ -261,6 +289,21 @@ func (m *Measurer) runWithRedirect(
 	}
 	return nil
 
+}
+
+func mergeAddresses(addrs []string, controlAddrs []string) []string {
+	appendIfUnique := func(slice []string, item string) []string {
+		for _, i := range slice {
+			if i == item {
+				return slice
+			}
+		}
+		return append(slice, item)
+	}
+	for _, c := range controlAddrs {
+		addrs = appendIfUnique(addrs, c)
+	}
+	return addrs
 }
 
 // dnsLookup finds the IP address(es) associated with a domain name
