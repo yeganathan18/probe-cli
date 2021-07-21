@@ -190,7 +190,6 @@ func (m *Measurer) Run(
 ) error {
 	tk := new(TestKeys)
 	measurement.TestKeys = tk
-	// TODO(kelmenhorst): what is the specification of the TestKeys Agent? do we need to use "agent" hier?
 	tk.Agent = "redirect"
 	tk.ClientResolver = sess.ResolverIP()
 	URL, err := url.Parse(string(measurement.Input))
