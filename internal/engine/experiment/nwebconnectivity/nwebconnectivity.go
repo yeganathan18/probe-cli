@@ -596,12 +596,23 @@ func (m *Measurer) getTransport(state tls.ConnectionState, conn net.Conn, config
 		return m.getHTTP2Transport(conn, config)
 	default:
 		// assume HTTP 1.x + TLS.
-		dialer := &singleDialerHTTP1{conn: &conn}
-		return netxlite.NewHTTPTransport(dialer, config, m.handshaker)
+		return m.getHTTPTransport(conn, config)
 	}
 }
 
-// getHTTP3Transport creates am http2.Transport
+// getHTTPTransport creates an http.Transport
+func (m *Measurer) getHTTPTransport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
+	transport = &http.Transport{
+		DialContext:        (&singleDialerHTTP1{conn: &conn}).DialContext,
+		DialTLSContext:     (&singleDialerHTTP1{conn: &conn}).DialContext,
+		TLSClientConfig:    config,
+		DisableCompression: true,
+	}
+	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http.Transport)}
+	return transport
+}
+
+// getHTTP2Transport creates an http2.Transport
 func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
 	transport = &http2.Transport{
 		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
