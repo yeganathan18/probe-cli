@@ -5,10 +5,20 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 )
+
+type RequestEntry struct {
+	archival.RequestEntry
+}
+
+func makeRequestEntry(begin time.Time) *RequestEntry {
+	startTime := time.Now().Sub(begin).Seconds()
+	return &RequestEntry{archival.RequestEntry{T: startTime}}
+}
 
 const defaultSnapSize = 1 << 17
 
@@ -37,12 +47,12 @@ func addheaders(
 	})
 }
 
-func setEntryRequest(ctx context.Context, req *http.Request, entry *archival.RequestEntry) {
-	setEntryRequestBody(ctx, req, entry)
-	setEntryRequestMetadata(req, entry)
+func (e *RequestEntry) setRequest(ctx context.Context, req *http.Request) {
+	e.setRequestBody(ctx, req)
+	e.setRequestMetadata(req)
 }
 
-func setEntryRequestBody(ctx context.Context, req *http.Request, entry *archival.RequestEntry) {
+func (e *RequestEntry) setRequestBody(ctx context.Context, req *http.Request) {
 	if req.Body == nil {
 		return
 	}
@@ -50,40 +60,40 @@ func setEntryRequestBody(ctx context.Context, req *http.Request, entry *archival
 	if err != nil {
 		return
 	}
-	entry.Request.Body.Value = string(data)
-	entry.Request.BodyIsTruncated = len(data) >= defaultSnapSize
+	e.Request.Body.Value = string(data)
+	e.Request.BodyIsTruncated = len(data) >= defaultSnapSize
 }
 
-func setEntryRequestMetadata(req *http.Request, entry *archival.RequestEntry) {
-	entry.Request.Headers = make(map[string]archival.MaybeBinaryValue)
+func (e *RequestEntry) setRequestMetadata(req *http.Request) {
+	e.Request.Headers = make(map[string]archival.MaybeBinaryValue)
 	addheaders(
-		req.Header, &entry.Request.HeadersList, &entry.Request.Headers)
-	entry.Request.Method = req.Method
-	entry.Request.URL = req.URL.String()
-	// entry.Request.Transport
+		req.Header, &e.Request.HeadersList, &e.Request.Headers)
+	e.Request.Method = req.Method
+	e.Request.URL = req.URL.String()
+	// e.Request.Transport
 }
 
-func setEntryFailure(err error, entry *archival.RequestEntry) {
-	entry.Failure = archival.NewFailure(err)
+func (e *RequestEntry) setFailure(err error) {
+	e.Failure = archival.NewFailure(err)
 }
 
-func setEntryResponse(ctx context.Context, resp *http.Response, entry *archival.RequestEntry) {
+func (e *RequestEntry) setResponse(ctx context.Context, resp *http.Response) {
 	if resp == nil {
 		return
 	}
-	setEntryResponseBody(ctx, resp, entry)
-	setEntryResponseMetadata(resp, entry)
+	e.setResponseBody(ctx, resp)
+	e.setResponseMetadata(resp)
 }
 
-func setEntryResponseMetadata(resp *http.Response, entry *archival.RequestEntry) {
-	entry.Response.Headers = make(map[string]archival.MaybeBinaryValue)
+func (e *RequestEntry) setResponseMetadata(resp *http.Response) {
+	e.Response.Headers = make(map[string]archival.MaybeBinaryValue)
 	addheaders(
-		resp.Header, &entry.Response.HeadersList, &entry.Response.Headers)
-	entry.Response.Code = int64(resp.StatusCode)
-	entry.Response.Locations = resp.Header.Values("Location")
+		resp.Header, &e.Response.HeadersList, &e.Response.Headers)
+	e.Response.Code = int64(resp.StatusCode)
+	e.Response.Locations = resp.Header.Values("Location")
 }
 
-func setEntryResponseBody(ctx context.Context, resp *http.Response, entry *archival.RequestEntry) {
+func (e *RequestEntry) setResponseBody(ctx context.Context, resp *http.Response) {
 	if resp.Body == nil {
 		return
 	}
@@ -91,6 +101,6 @@ func setEntryResponseBody(ctx context.Context, resp *http.Response, entry *archi
 	if err != nil {
 		return
 	}
-	entry.Response.Body.Value = string(data)
-	entry.Response.BodyIsTruncated = len(data) >= defaultSnapSize
+	e.Response.Body.Value = string(data)
+	e.Response.BodyIsTruncated = len(data) >= defaultSnapSize
 }
