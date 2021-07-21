@@ -439,9 +439,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
 func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) (h3 bool) {
-	entry := makeRequestEntry(sess.measurement.MeasurementStartTimeSaved)
 	req := m.getRequest(ctx, sess.URL, "GET", nil)
-	entry.setRequest(ctx, req)
 	httpClient := &http.Client{
 		Jar:       sess.jar,
 		Transport: transport,
@@ -451,6 +449,9 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 	}
 	defer httpClient.CloseIdleConnections()
 
+	startHTTP := time.Now()
+	entry := makeRequestEntry(sess.measurement.MeasurementStartTimeSaved, startHTTP)
+	entry.setRequest(ctx, req)
 	resp, err := httpClient.Do(req)
 	entry.setFailure(err)
 	entry.setResponse(ctx, resp)

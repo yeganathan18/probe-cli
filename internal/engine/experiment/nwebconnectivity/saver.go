@@ -20,8 +20,8 @@ type RequestEntry struct {
 	archival.RequestEntry
 }
 
-func makeRequestEntry(begin time.Time) *RequestEntry {
-	startTime := time.Now().Sub(begin).Seconds()
+func makeRequestEntry(begin time.Time, stop time.Time) *RequestEntry {
+	startTime := stop.Sub(begin).Seconds()
 	return &RequestEntry{archival.RequestEntry{T: startTime}}
 }
 
