@@ -481,12 +481,15 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 		redReq := m.getRequest(ctx, location, reqMethod, reqBody)
 		redirects <- &redirectInfo{location: location, req: redReq}
 	}
-	return m.discoverH3Server(resp)
+	return m.discoverH3Server(resp, sess.URL)
 }
 
 // discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response
 // to check whether the server announces to support h3
-func (m *Measurer) discoverH3Server(resp *http.Response) (h3 bool) {
+func (m *Measurer) discoverH3Server(resp *http.Response, URL *url.URL) (h3 bool) {
+	if URL.Scheme != "https" {
+		return false
+	}
 	alt_svc := resp.Header.Get("Alt-Svc")
 	entries := strings.Split(alt_svc, ";")
 	for _, e := range entries {
