@@ -174,7 +174,6 @@ type MeasurementSession struct {
 	experimentSession model.ExperimentSession
 	jar               *cookiejar.Jar
 	measurement       *model.Measurement
-	redirectedReq     *http.Request
 	URL               *url.URL
 }
 
@@ -281,7 +280,6 @@ func (m *Measurer) runWithRedirect(
 			experimentSession: sess.experimentSession,
 			jar:               sess.jar,
 			measurement:       sess.measurement,
-			redirectedReq:     rdrct.req,
 			URL:               rdrct.location,
 		}
 		return m.runWithRedirect(session, ctx, nRedirects+1)
@@ -495,10 +493,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
 func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) (h3 bool) {
-	req := sess.redirectedReq
-	if req == nil {
-		req = m.getRequest(ctx, sess.URL, "GET", nil)
-	}
+	req := m.getRequest(ctx, sess.URL, "GET", nil)
 	httpClient := &http.Client{
 		Jar:       sess.jar,
 		Transport: transport,
