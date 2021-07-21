@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 )
 
@@ -103,4 +104,30 @@ func (e *RequestEntry) setResponseBody(ctx context.Context, resp *http.Response)
 	}
 	e.Response.Body.Value = string(data)
 	e.Response.BodyIsTruncated = len(data) >= defaultSnapSize
+}
+
+type DNSQueryEntry struct {
+	archival.DNSQueryEntry
+}
+
+func makeDNSQueryEntry(begin time.Time, stop time.Time) *DNSQueryEntry {
+	return &DNSQueryEntry{archival.DNSQueryEntry{
+		T: stop.Sub(begin).Seconds(),
+	}}
+}
+
+func (e *DNSQueryEntry) setMetadata(resolver *errorsx.ErrorWrapperResolver, hostname string) {
+	e.Engine = resolver.Network()
+	e.ResolverAddress = resolver.Address()
+	e.Hostname = hostname
+}
+
+func (e *DNSQueryEntry) setResult(addrs []string, err error, qtype dnsQueryType) {
+	e.QueryType = string(qtype)
+	e.Failure = archival.NewFailure(err)
+	for _, addr := range addrs {
+		if qtype.ipoftype(addr) {
+			e.Answers = append(e.Answers, qtype.makeanswerentry(addr))
+		}
+	}
 }

@@ -316,24 +316,14 @@ func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []st
 	addrs, err := resolver.LookupHost(ctx, idnaHost)
 	stop := time.Now()
 	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
-		entry := archival.DNSQueryEntry{
-			Engine:          resolver.Network(),
-			Failure:         archival.NewFailure(err),
-			Hostname:        hostname,
-			QueryType:       string(qtype),
-			ResolverAddress: resolver.Address(),
-			T:               stop.Sub(sess.measurement.MeasurementStartTimeSaved).Seconds(),
-		}
-		for _, addr := range addrs {
-			if qtype.ipoftype(addr) {
-				entry.Answers = append(entry.Answers, qtype.makeanswerentry(addr))
-			}
-		}
+		entry := makeDNSQueryEntry(sess.measurement.MeasurementStartTimeSaved, stop)
+		entry.setMetadata(resolver, hostname)
+		entry.setResult(addrs, err, qtype)
 		if len(entry.Answers) <= 0 && err == nil {
 			continue
 		}
 		tk.Lock()
-		tk.Queries = append(tk.Queries, entry)
+		tk.Queries = append(tk.Queries, entry.DNSQueryEntry)
 		tk.Unlock()
 	}
 	tk.DNSExperimentFailure = archival.NewFailure(err)
