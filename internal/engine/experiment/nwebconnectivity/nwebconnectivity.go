@@ -225,6 +225,7 @@ func (m *Measurer) runWithRedirect(
 	if len(addresses) == 0 {
 		return nil
 	}
+	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 
 	// control
 	testhelper := findTestHelper(sess.experimentSession)
@@ -243,15 +244,14 @@ func (m *Measurer) runWithRedirect(
 			"Accept-Language": {httpheader.AcceptLanguage()},
 			"User-Agent":      {httpheader.UserAgent()},
 		},
-		// let the testhelper do the DNS resolve step (the size of the slice is arbitrary)
-		TCPConnect: make([]string, 1),
+		TCPConnect: epnts,
 	})
 	// TODO(kelmenhorst): what to do in case of error?
 	if err != nil {
 		return nil
 	}
 	addresses = mergeAddresses(addresses, tk.Control.DNS.Addrs)
-	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
+	epnts = m.getEndpoints(addresses, sess.URL.Scheme)
 
 	var wg sync.WaitGroup
 	// at most we should get a redirect response from each endpoints, for both TCP and QUIC
