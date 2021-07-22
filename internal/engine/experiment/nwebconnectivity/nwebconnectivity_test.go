@@ -213,14 +213,20 @@ func TestTLSHandshakeFails(t *testing.T) {
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
 	}
-	if len(tk.TLSHandshakes) != 1 {
-		t.Fatal("unexpected number of TLS handshakes")
+	if len(tk.TLSHandshakes) != 2 {
+		t.Fatal("unexpected number of TLS handshakes", len(tk.TLSHandshakes))
 	}
 	if tk.TLSHandshakes[0].Failure == nil {
 		t.Fatal("expected a TLS handshake failure")
 	}
 	if *tk.TLSHandshakes[0].Failure != errorsx.FailureSSLInvalidHostname {
 		t.Fatal("unexpected failure type")
+	}
+	if tk.TLSHandshakes[1].Failure == nil {
+		t.Fatal("expected a TLS handshake failure")
+	}
+	if *tk.TLSHandshakes[1].Failure != errorsx.FailureSSLInvalidCertificate {
+		t.Fatal("unexpected failure type", *tk.TLSHandshakes[1].Failure)
 	}
 }
 
