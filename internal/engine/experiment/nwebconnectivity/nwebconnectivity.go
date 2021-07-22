@@ -223,7 +223,11 @@ func (m *Measurer) runWithRedirect(
 	// perform DNS lookup
 	addresses := m.dnsLookup(sess, ctx)
 	if len(addresses) == 0 {
-		return nil
+		addr := net.ParseIP(sess.URL.String())
+		if addr == nil {
+			return nil
+		}
+		addresses = []string{addr.String()}
 	}
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 
