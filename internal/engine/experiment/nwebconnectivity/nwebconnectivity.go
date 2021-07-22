@@ -224,7 +224,9 @@ func (m *Measurer) runWithRedirect(
 	addresses := m.dnsLookup(sess, ctx)
 	if len(addresses) == 0 {
 		addr := net.ParseIP(sess.URL.String())
-		addresses = []string{addr.String()}
+		if addr != nil {
+			addresses = []string{addr.String()}
+		}
 	}
 	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
 
