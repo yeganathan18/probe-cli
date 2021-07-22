@@ -340,8 +340,8 @@ func (m *Measurer) measure(
 ) error {
 	defer wg.Done()
 	// connect
-	conn := m.connect(sess.measurement, ctx, addr)
-	if conn == nil {
+	conn, err := m.connect(sess.measurement, ctx, addr)
+	if err != nil {
 		return nil
 	}
 	var transport http.RoundTripper
@@ -350,7 +350,15 @@ func (m *Measurer) measure(
 		transport = netxlite.NewHTTPTransport(&singleDialerHTTP1{conn: &conn}, nil, nil)
 	case "https":
 		// Handshake
-		transport = m.tlsHandshake(sess, ctx, conn)
+		config := &tls.Config{
+			ServerName: sess.URL.Hostname(),
+			NextProtos: []string{"h2", "http/1.1"},
+		}
+		var err error
+		transport, err = m.tlsHandshake(sess, ctx, conn, config)
+		if err != nil {
+			transport, err = m.measureWithExampleSNI(sess, ctx, addr)
+		}
 	}
 	if transport == nil {
 		return nil
@@ -375,7 +383,7 @@ func (m *Measurer) measure(
 }
 
 // connect performs the TCP three way handshake
-func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) net.Conn {
+func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) (net.Conn, error) {
 	conn, err := m.dialer.DialContext(ctx, "tcp", addr)
 	stop := time.Now()
 
@@ -394,7 +402,7 @@ func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, 
 	tk.Lock()
 	tk.TCPConnect = append(tk.TCPConnect, entry)
 	tk.Unlock()
-	return conn
+	return conn, err
 }
 
 // quicHandshake performs the QUIC handshake
@@ -418,12 +426,20 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{})
 }
 
-// tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn) http.RoundTripper {
+func (m *Measurer) measureWithExampleSNI(sess *MeasurementSession, ctx context.Context, addr string) (http.RoundTripper, error) {
+	conn, err := m.connect(sess.measurement, ctx, addr)
+	if err != nil {
+		return nil, err
+	}
 	config := &tls.Config{
-		ServerName: sess.URL.Hostname(),
+		ServerName: "example.com",
 		NextProtos: []string{"h2", "http/1.1"},
 	}
+	return m.tlsHandshake(sess, ctx, conn, config)
+}
+
+// tlsHandshake performs the TLS handshake
+func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn, config *tls.Config) (http.RoundTripper, error) {
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
 	stop := time.Now()
 
@@ -435,9 +451,9 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return m.getTransport(state, tlsconn, config)
+	return m.getTransport(state, tlsconn, config), nil
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
