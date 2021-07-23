@@ -125,7 +125,7 @@ func TestDNSQueryEntry(t *testing.T) {
 func TestTLSHandshake(t *testing.T) {
 	begin := time.Now()
 	stop := time.Now()
-	entry := makeTLSHandshakeEntry(begin, stop, QUICTLSExperimentTag)
+	entry := makeTLSHandshakeEntry(begin, stop, QUICTLSExperimentTag, false)
 	if entry.T != stop.Sub(begin).Seconds() {
 		t.Fatal("unexpected timestamp")
 	}

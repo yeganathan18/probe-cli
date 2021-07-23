@@ -354,8 +354,8 @@ func (m *Measurer) measure(
 			ServerName: sess.URL.Hostname(),
 			NextProtos: []string{"h2", "http/1.1"},
 		}
-		var err error
-		transport, err = m.tlsHandshake(sess, ctx, conn, config)
+		transport, err = m.tlsHandshake(sess, ctx, conn, config, false)
+		// SNI example.com experiment
 		if err != nil {
 			transport, err = m.measureWithExampleSNI(sess, ctx, addr)
 		}
@@ -372,7 +372,11 @@ func (m *Measurer) measure(
 		return nil
 	}
 	// QUIC handshake
-	transport = m.quicHandshake(sess, ctx, addr)
+	transport, err = m.quicHandshake(sess, ctx, addr, false)
+	// SNI example.com experiment
+	if err != nil {
+		transport, err = m.measureWithExampleSNI(sess, ctx, addr)
+	}
 	if transport == nil {
 		return nil
 	}
@@ -406,7 +410,7 @@ func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, 
 }
 
 // quicHandshake performs the QUIC handshake
-func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, addr string) http.RoundTripper {
+func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, addr string, snitest bool) (http.RoundTripper, error) {
 	tlscfg := &tls.Config{
 		ServerName: sess.URL.Hostname(),
 		NextProtos: []string{"h3"},
@@ -414,16 +418,16 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 	qcfg := &quic.Config{}
 	qsess, err := m.quicDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
 	stop := time.Now()
-	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag)
+	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
 	entry.setQUICHandshakeResult(tlscfg, qsess, err)
 	tk := sess.measurement.TestKeys.(*TestKeys)
 	tk.Lock()
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{})
+	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
 }
 
 func (m *Measurer) measureWithExampleSNI(sess *MeasurementSession, ctx context.Context, addr string) (http.RoundTripper, error) {
@@ -435,15 +439,15 @@ func (m *Measurer) measureWithExampleSNI(sess *MeasurementSession, ctx context.C
 		ServerName: "example.com",
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-	return m.tlsHandshake(sess, ctx, conn, config)
+	return m.tlsHandshake(sess, ctx, conn, config, true)
 }
 
 // tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn, config *tls.Config) (http.RoundTripper, error) {
+func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn, config *tls.Config, snitest bool) (http.RoundTripper, error) {
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
 	stop := time.Now()
 
-	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag)
+	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
 	entry.setHandshakeResult(config, state, err)
 	entry.Fingerprint = m.fingerprintClient
 	tk := sess.measurement.TestKeys.(*TestKeys)
