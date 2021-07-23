@@ -2,6 +2,8 @@ package nwebconnectivity
 
 import (
 	"context"
+	"net/url"
+	"strings"
 
 	"github.com/ooni/probe-cli/v3/internal/engine/geolocate"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpx"
@@ -90,4 +92,20 @@ func findTestHelper(e model.ExperimentSession) (testhelper *model.Service) {
 		}
 	}
 	return testhelper
+}
+
+// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response of the control measurement
+// to check whether the server announces to support h3
+func (m *Measurer) discoverH3Server(resp *ControlHTTPRequestResult, URL *url.URL) (h3 bool) {
+	if URL.Scheme != "https" {
+		return false
+	}
+	alt_svc := resp.Headers["Alt-Svc"]
+	entries := strings.Split(alt_svc, ";")
+	for _, e := range entries {
+		if strings.Contains(e, "h3") {
+			return true
+		}
+	}
+	return false
 }

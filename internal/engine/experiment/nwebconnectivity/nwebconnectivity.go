@@ -256,6 +256,8 @@ func (m *Measurer) runWithRedirect(
 	addresses = mergeAddresses(addresses, tk.Control.DNS.Addrs)
 	epnts = m.getEndpoints(addresses, sess.URL.Scheme)
 
+	h3Support := m.discoverH3Server(&tk.Control.HTTPRequest, sess.URL)
+
 	var wg sync.WaitGroup
 	// at most we should get a redirect response from each endpoints, for both TCP and QUIC
 	redirects := make(chan *redirectInfo, len(epnts)*2+1)
@@ -263,8 +265,7 @@ func (m *Measurer) runWithRedirect(
 	// for each IP address
 	for _, ip := range epnts {
 		wg.Add(1)
-		go m.measure(sess, ctx, ip, &wg, redirects)
-		// TODO: perform the control measurement
+		go m.measure(sess, ctx, ip, &wg, redirects, h3Support)
 	}
 	wg.Wait()
 	redirects <- nil
@@ -337,6 +338,7 @@ func (m *Measurer) measure(
 	addr string,
 	wg *sync.WaitGroup,
 	redirects chan *redirectInfo,
+	h3Support bool,
 ) error {
 	defer wg.Done()
 	// connect
@@ -365,7 +367,7 @@ func (m *Measurer) measure(
 	}
 
 	// HTTP roundtrip
-	h3Support := m.httpRoundtrip(sess, ctx, transport, redirects)
+	m.httpRoundtrip(sess, ctx, transport, redirects)
 
 	// stop if h3 is not supported
 	if !h3Support {
@@ -461,7 +463,7 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) (h3 bool) {
+func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) {
 	req := m.getRequest(ctx, sess.URL, "GET", nil)
 	httpClient := &http.Client{
 		Jar:       sess.jar,
@@ -499,23 +501,6 @@ func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, 
 		redReq := m.getRequest(ctx, location, reqMethod, reqBody)
 		redirects <- &redirectInfo{location: location, req: redReq}
 	}
-	return m.discoverH3Server(resp, sess.URL)
-}
-
-// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response
-// to check whether the server announces to support h3
-func (m *Measurer) discoverH3Server(resp *http.Response, URL *url.URL) (h3 bool) {
-	if URL.Scheme != "https" {
-		return false
-	}
-	alt_svc := resp.Header.Get("Alt-Svc")
-	entries := strings.Split(alt_svc, ";")
-	for _, e := range entries {
-		if strings.Contains(e, "h3") {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *Measurer) redirectBehavior(resp *http.Response, req *http.Request) (shouldRedirect, includeBody bool, location *url.URL) {
