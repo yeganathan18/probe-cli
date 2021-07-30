@@ -16,6 +16,7 @@ type ControlRequest struct {
 	HTTPRequest        string              `json:"http_request"`
 	HTTPRequestHeaders map[string][]string `json:"http_request_headers"`
 	TCPConnect         []string            `json:"tcp_connect"`
+	QUICHandshake      []string            `json:"quic_handshake"`
 }
 
 // ControlTCPConnectResult is the result of the TCP connect
@@ -35,6 +36,20 @@ type ControlHTTPRequestResult struct {
 	StatusCode int64             `json:"status_code"`
 }
 
+// ControlQUICHandshakeResult is the result of the QUIC handshake
+// attempt performed by the control vantage point.
+type ControlQUICHandshakeResult struct {
+	Status  bool    `json:"status"`
+	Failure *string `json:"failure"`
+}
+
+// ControlHTTP3RequestResult is the result of the HTTP/3 request
+// performed by the control vantage point.
+type ControlHTTP3RequestResult struct {
+	Failure    *string `json:"failure"`
+	StatusCode int64   `json:"status_code"`
+}
+
 // ControlDNSResult is the result of the DNS lookup
 // performed by the control vantage point.
 type ControlDNSResult struct {
@@ -45,9 +60,11 @@ type ControlDNSResult struct {
 
 // ControlResponse is the response from the control service.
 type ControlResponse struct {
-	TCPConnect  map[string]ControlTCPConnectResult `json:"tcp_connect"`
-	HTTPRequest ControlHTTPRequestResult           `json:"http_request"`
-	DNS         ControlDNSResult                   `json:"dns"`
+	DNS           ControlDNSResult                      `json:"dns"`
+	HTTPRequest   ControlHTTPRequestResult              `json:"http_request"`
+	HTTP3Request  ControlHTTPRequestResult              `json:"http3_request"`
+	QUICHandshake map[string]ControlQUICHandshakeResult `json:"quic_handshake"`
+	TCPConnect    map[string]ControlTCPConnectResult    `json:"tcp_connect"`
 }
 
 // Control performs the control request and returns the response.

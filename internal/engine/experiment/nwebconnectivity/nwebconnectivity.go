@@ -247,7 +247,8 @@ func (m *Measurer) runWithRedirect(
 			"Accept-Language": {httpheader.AcceptLanguage()},
 			"User-Agent":      {httpheader.UserAgent()},
 		},
-		TCPConnect: epnts,
+		QUICHandshake: epnts,
+		TCPConnect:    epnts,
 	})
 	// TODO(kelmenhorst): what to do in case of error?
 	if err != nil {
