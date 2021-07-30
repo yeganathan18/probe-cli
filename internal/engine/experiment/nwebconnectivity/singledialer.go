@@ -19,7 +19,7 @@ func (s *singleDialerHTTP1) DialContext(ctx context.Context, network string, add
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
-		return nil, errors.New("cannot reuse connection")
+		return nil, ErrNoConnReuse{location: addr}
 	}
 	c := s.conn
 	s.conn = nil
@@ -35,7 +35,7 @@ func (s *singleDialerH2) DialTLS(network string, addr string, cfg *tls.Config) (
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
-		return nil, errors.New("cannot reuse connection")
+		return nil, ErrNoConnReuse{location: addr}
 	}
 	c := s.conn
 	s.conn = nil

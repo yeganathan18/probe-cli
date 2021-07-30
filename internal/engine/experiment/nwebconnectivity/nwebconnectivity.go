@@ -35,6 +35,15 @@ type Config struct {
 	ClientHello string `ooni:"Use ClientHello of specific client for parroting."`
 }
 
+type ErrNoConnReuse struct {
+	error
+	location string
+}
+
+func (err ErrNoConnReuse) Error() string {
+	return "cannot reuse connection"
+}
+
 // Measurer performs the measurement.
 type Measurer struct {
 	Config            Config
@@ -169,11 +178,14 @@ var (
 	ErrUnsupportedInput = errors.New("unsupported input scheme")
 )
 
-type MeasurementSession struct {
-	experimentSession model.ExperimentSession
-	jar               *cookiejar.Jar
-	measurement       *model.Measurement
-	URL               *url.URL
+type MeasurementConfig struct {
+	addr       string
+	h3Support  bool
+	jar        *cookiejar.Jar
+	redirectch chan *redirectInfo
+	redirected *redirectInfo
+	URL        *url.URL
+	wg         *sync.WaitGroup
 }
 
 type redirectInfo struct {
@@ -192,56 +204,56 @@ func (m *Measurer) Run(
 	measurement.TestKeys = tk
 	tk.Agent = "redirect"
 	tk.ClientResolver = sess.ResolverIP()
-	URL, err := url.Parse(string(measurement.Input))
-	if err != nil {
-		return ErrInputIsNotAnURL
-	}
-	// create session
-	jar, err := cookiejar.New(nil)
-	runtimex.PanicOnError(err, "cookiejar.New failed")
-	session := &MeasurementSession{
-		experimentSession: sess,
-		jar:               jar,
-		measurement:       measurement,
-		URL:               URL,
-	}
-	return m.runWithRedirect(session, ctx, 0)
+	return m.runWithRedirect(sess, measurement, ctx, 0, nil)
 }
 
 func (m *Measurer) runWithRedirect(
-	sess *MeasurementSession,
+	sess model.ExperimentSession,
+	measurement *model.Measurement,
 	ctx context.Context,
 	nRedirects int,
+	rdrct *redirectInfo,
 ) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	if sess.URL.Scheme != "http" && sess.URL.Scheme != "https" {
+	var URL *url.URL
+	var err error
+	switch rdrct {
+	case nil:
+		URL, err = url.Parse(string(measurement.Input))
+		if err != nil {
+			return ErrInputIsNotAnURL
+		}
+	default:
+		URL = rdrct.location
+	}
+
+	if URL.Scheme != "http" && URL.Scheme != "https" {
 		return ErrUnsupportedInput
 	}
 
 	// perform DNS lookup
-	addresses := m.dnsLookup(sess, ctx)
+	addresses := m.dnsLookup(*measurement, ctx, URL)
 	if len(addresses) == 0 {
-		addr := net.ParseIP(sess.URL.String())
+		addr := net.ParseIP(URL.String())
 		if addr != nil {
 			addresses = []string{addr.String()}
 		}
 	}
-	epnts := m.getEndpoints(addresses, sess.URL.Scheme)
+	epnts := m.getEndpoints(addresses, URL.Scheme)
 
 	// control
-	testhelper := findTestHelper(sess.experimentSession)
+	testhelper := findTestHelper(sess)
 	if testhelper == nil {
 		return ErrNoAvailableTestHelpers
 	}
-	sess.measurement.TestHelpers = map[string]interface{}{
+	measurement.TestHelpers = map[string]interface{}{
 		"backend": testhelper,
 	}
-	tk := sess.measurement.TestKeys.(*TestKeys)
-	var err error
-	tk.Control, err = Control(ctx, sess.experimentSession, testhelper.Address, ControlRequest{
-		HTTPRequest: sess.URL.String(),
+	tk := measurement.TestKeys.(*TestKeys)
+	tk.Control, err = Control(ctx, sess, testhelper.Address, ControlRequest{
+		HTTPRequest: URL.String(),
 		HTTPRequestHeaders: map[string][]string{
 			"Accept":          {httpheader.Accept()},
 			"Accept-Language": {httpheader.AcceptLanguage()},
@@ -255,23 +267,35 @@ func (m *Measurer) runWithRedirect(
 		return nil
 	}
 	addresses = mergeAddresses(addresses, tk.Control.DNS.Addrs)
-	epnts = m.getEndpoints(addresses, sess.URL.Scheme)
+	epnts = m.getEndpoints(addresses, URL.Scheme)
 
-	h3Support := m.discoverH3Server(&tk.Control.HTTPRequest, sess.URL)
+	// TODO: replace this by checking whether the Control response has a successful H3 entry?
+	h3Support := m.discoverH3Server(&tk.Control.HTTPRequest, URL)
 
 	var wg sync.WaitGroup
 	// at most we should get a redirect response from each endpoints, for both TCP and QUIC
-	redirects := make(chan *redirectInfo, len(epnts)*2+1)
+	redirectch := make(chan *redirectInfo, len(epnts)*2+1)
 
 	// for each IP address
 	for _, ip := range epnts {
 		wg.Add(1)
-		go m.measure(sess, ctx, ip, &wg, redirects, h3Support)
+		jar, err := cookiejar.New(nil)
+		runtimex.PanicOnError(err, "cookiejar.New failed")
+		mconfig := &MeasurementConfig{
+			addr:       ip,
+			h3Support:  h3Support,
+			jar:        jar,
+			redirectch: redirectch,
+			redirected: rdrct,
+			URL:        URL,
+			wg:         &wg,
+		}
+		go m.measure(measurement, ctx, mconfig)
 	}
 	wg.Wait()
-	redirects <- nil
+	redirectch <- nil
 
-	rdrct := <-redirects
+	rdrct = <-redirectch
 	// we only follow one redirect request here, assuming that we get the same redirect location from every endpoint that belongs to the domain
 	// we assume this so that the number of requests does not exponentially grow with every redirect
 	if rdrct != nil {
@@ -279,13 +303,7 @@ func (m *Measurer) runWithRedirect(
 			// we stop after 20 redirects, as do Chrome and Firefox, TODO(kelmenhorst): how do we test this?
 			return errors.New("stopped after 20 redirects")
 		}
-		session := &MeasurementSession{
-			experimentSession: sess.experimentSession,
-			jar:               sess.jar,
-			measurement:       sess.measurement,
-			URL:               rdrct.location,
-		}
-		return m.runWithRedirect(session, ctx, nRedirects+1)
+		return m.runWithRedirect(sess, measurement, ctx, nRedirects+1, rdrct)
 	}
 	return nil
 
@@ -307,10 +325,10 @@ func mergeAddresses(addrs []string, controlAddrs []string) []string {
 }
 
 // dnsLookup finds the IP address(es) associated with a domain name
-func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []string {
-	tk := sess.measurement.TestKeys.(*TestKeys)
+func (m *Measurer) dnsLookup(measurement model.Measurement, ctx context.Context, URL *url.URL) []string {
+	tk := measurement.TestKeys.(*TestKeys)
 	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
-	hostname := sess.URL.Hostname()
+	hostname := URL.Hostname()
 	idnaHost, err := idna.ToASCII(hostname)
 	if err != nil {
 		tk.DNSExperimentFailure = archival.NewFailure(err)
@@ -319,7 +337,7 @@ func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []st
 	addrs, err := resolver.LookupHost(ctx, idnaHost)
 	stop := time.Now()
 	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
-		entry := makeDNSQueryEntry(sess.measurement.MeasurementStartTimeSaved, stop)
+		entry := makeDNSQueryEntry(measurement.MeasurementStartTimeSaved, stop)
 		entry.setMetadata(resolver, hostname)
 		entry.setResult(addrs, err, qtype)
 		if len(entry.Answers) <= 0 && err == nil {
@@ -334,33 +352,30 @@ func (m *Measurer) dnsLookup(sess *MeasurementSession, ctx context.Context) []st
 }
 
 func (m *Measurer) measure(
-	sess *MeasurementSession,
+	measurement *model.Measurement,
 	ctx context.Context,
-	addr string,
-	wg *sync.WaitGroup,
-	redirects chan *redirectInfo,
-	h3Support bool,
+	mconfig *MeasurementConfig,
 ) error {
-	defer wg.Done()
+	defer mconfig.wg.Done()
 	// connect
-	conn, err := m.connect(sess.measurement, ctx, addr)
+	conn, err := m.connect(measurement, ctx, mconfig.addr)
 	if err != nil {
 		return nil
 	}
 	var transport http.RoundTripper
-	switch sess.URL.Scheme {
+	switch mconfig.URL.Scheme {
 	case "http":
 		transport = netxlite.NewHTTPTransport(&singleDialerHTTP1{conn: &conn}, nil, nil)
 	case "https":
 		// Handshake
 		config := &tls.Config{
-			ServerName: sess.URL.Hostname(),
+			ServerName: mconfig.URL.Hostname(),
 			NextProtos: []string{"h2", "http/1.1"},
 		}
-		transport, err = m.tlsHandshake(sess, ctx, conn, config, false)
+		transport, err = m.tlsHandshake(measurement, ctx, conn, config, false)
 		// SNI example.com experiment
 		if err != nil {
-			transport, err = m.measureWithExampleSNI(sess, ctx, addr)
+			transport, err = m.measureWithExampleSNI(measurement, ctx, mconfig)
 		}
 	}
 	if transport == nil {
@@ -368,23 +383,26 @@ func (m *Measurer) measure(
 	}
 
 	// HTTP roundtrip
-	m.httpRoundtrip(sess, ctx, transport, redirects)
+	err = m.httpRoundtrip(measurement, ctx, transport, mconfig)
+	if err != nil {
+		return nil
+	}
 
 	// stop if h3 is not supported
-	if !h3Support {
+	if !mconfig.h3Support {
 		return nil
 	}
 	// QUIC handshake
-	transport, err = m.quicHandshake(sess, ctx, addr, false)
+	transport, err = m.quicHandshake(measurement, ctx, mconfig, false)
 	// SNI example.com experiment
 	if err != nil {
-		transport, err = m.measureWithExampleSNI(sess, ctx, addr)
+		transport, err = m.measureWithExampleSNI(measurement, ctx, mconfig)
 	}
 	if transport == nil {
 		return nil
 	}
 	// HTTP/3 roundtrip
-	m.httpRoundtrip(sess, ctx, transport, redirects)
+	m.httpRoundtrip(measurement, ctx, transport, mconfig)
 
 	return nil
 }
@@ -413,17 +431,17 @@ func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, 
 }
 
 // quicHandshake performs the QUIC handshake
-func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, addr string, snitest bool) (http.RoundTripper, error) {
+func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Context, mconfig *MeasurementConfig, snitest bool) (http.RoundTripper, error) {
 	tlscfg := &tls.Config{
-		ServerName: sess.URL.Hostname(),
+		ServerName: mconfig.URL.Hostname(),
 		NextProtos: []string{"h3"},
 	}
 	qcfg := &quic.Config{}
-	qsess, err := m.quicDialer.DialContext(ctx, "udp", addr, tlscfg, qcfg)
+	qsess, err := m.quicDialer.DialContext(ctx, "udp", mconfig.addr, tlscfg, qcfg)
 	stop := time.Now()
-	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
+	entry := makeTLSHandshakeEntry(measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
 	entry.setQUICHandshakeResult(tlscfg, qsess, err)
-	tk := sess.measurement.TestKeys.(*TestKeys)
+	tk := measurement.TestKeys.(*TestKeys)
 	tk.Lock()
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
@@ -433,8 +451,8 @@ func (m *Measurer) quicHandshake(sess *MeasurementSession, ctx context.Context, 
 	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
 }
 
-func (m *Measurer) measureWithExampleSNI(sess *MeasurementSession, ctx context.Context, addr string) (http.RoundTripper, error) {
-	conn, err := m.connect(sess.measurement, ctx, addr)
+func (m *Measurer) measureWithExampleSNI(measurement *model.Measurement, ctx context.Context, mconfig *MeasurementConfig) (http.RoundTripper, error) {
+	conn, err := m.connect(measurement, ctx, mconfig.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -442,18 +460,18 @@ func (m *Measurer) measureWithExampleSNI(sess *MeasurementSession, ctx context.C
 		ServerName: "example.com",
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-	return m.tlsHandshake(sess, ctx, conn, config, true)
+	return m.tlsHandshake(measurement, ctx, conn, config, true)
 }
 
 // tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, conn net.Conn, config *tls.Config, snitest bool) (http.RoundTripper, error) {
+func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Context, conn net.Conn, config *tls.Config, snitest bool) (http.RoundTripper, error) {
 	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
 	stop := time.Now()
 
-	entry := makeTLSHandshakeEntry(sess.measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
+	entry := makeTLSHandshakeEntry(measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
 	entry.setHandshakeResult(config, state, err)
 	entry.Fingerprint = m.fingerprintClient
-	tk := sess.measurement.TestKeys.(*TestKeys)
+	tk := measurement.TestKeys.(*TestKeys)
 	tk.Lock()
 	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
 	tk.Unlock()
@@ -464,68 +482,40 @@ func (m *Measurer) tlsHandshake(sess *MeasurementSession, ctx context.Context, c
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(sess *MeasurementSession, ctx context.Context, transport http.RoundTripper, redirects chan *redirectInfo) {
-	req := m.getRequest(ctx, sess.URL, "GET", nil)
+func (m *Measurer) httpRoundtrip(measurement *model.Measurement, ctx context.Context, transport http.RoundTripper, mconfig *MeasurementConfig) error {
+	req := m.getRequest(ctx, mconfig.URL, "GET", nil)
+	var redirectReq *http.Request = nil
 	httpClient := &http.Client{
-		Jar:       sess.jar,
+		CheckRedirect: func(r *http.Request, reqs []*http.Request) error {
+			redirectReq = r
+			return nil
+			// return http.ErrUseLastResponse
+		},
+		Jar:       mconfig.jar,
 		Transport: transport,
-	}
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
 	}
 	defer httpClient.CloseIdleConnections()
 
 	startHTTP := time.Now()
-	entry := makeRequestEntry(sess.measurement.MeasurementStartTimeSaved, startHTTP)
+	entry := makeRequestEntry(measurement.MeasurementStartTimeSaved, startHTTP)
 	entry.setRequest(ctx, req)
 	resp, err := httpClient.Do(req)
+	var reuseerr ErrNoConnReuse
+	if errors.As(err, &reuseerr) {
+		if redirectReq != nil {
+			u := m.getURL(reuseerr.location)
+			mconfig.redirectch <- &redirectInfo{location: u, req: redirectReq}
+		}
+		return err
+	}
 	entry.setFailure(err)
 	entry.setResponse(ctx, resp)
 
-	tk := sess.measurement.TestKeys.(*TestKeys)
+	tk := measurement.TestKeys.(*TestKeys)
 	tk.Lock()
 	tk.Requests = append(tk.Requests, entry.RequestEntry)
 	tk.Unlock()
-
-	if resp == nil {
-		return
-	}
-	shouldRedirect, includeBody, location := m.redirectBehavior(resp, req)
-	if shouldRedirect {
-		var reqBody io.ReadCloser = nil
-		reqMethod := "GET"
-		if includeBody {
-			// we created the request with http.NewRequest so we know that the GetBody function will not return an error
-			reqBody, _ = req.GetBody()
-			reqMethod = req.Method
-		}
-		redReq := m.getRequest(ctx, location, reqMethod, reqBody)
-		redirects <- &redirectInfo{location: location, req: redReq}
-	}
-}
-
-func (m *Measurer) redirectBehavior(resp *http.Response, req *http.Request) (shouldRedirect, includeBody bool, location *url.URL) {
-	switch resp.StatusCode {
-	case 301, 302, 303:
-		shouldRedirect = true
-		includeBody = false
-		location, _ = resp.Location()
-	case 307, 308:
-		shouldRedirect = true
-		includeBody = true
-		var err error
-		// 308s have been observed in the wild being served
-		// without Location headers.
-		location, err = resp.Location()
-		if err != nil {
-			shouldRedirect = false
-			break
-		}
-		if req.GetBody == nil {
-			shouldRedirect = false
-		}
-	}
-	return shouldRedirect, includeBody, location
+	return nil
 }
 
 // getEndpoints connects IP addresses with the port associated with the URL scheme
@@ -546,6 +536,21 @@ func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
 		out = append(out, endpoint)
 	}
 	return out
+}
+
+// getEndpoints connects IP addresses with the port associated with the URL scheme
+func (m *Measurer) getURL(addr string) *url.URL {
+	a, sport, _ := net.SplitHostPort(addr)
+	var scheme string
+	switch sport {
+	case "80":
+		scheme = "http://"
+	case "443":
+		scheme = "https://"
+	}
+	ustring := scheme + a
+	u, _ := url.Parse(ustring)
+	return u
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
