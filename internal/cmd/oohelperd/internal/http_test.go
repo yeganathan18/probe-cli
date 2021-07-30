@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/ooni/probe-cli/v3/internal/cmd/oohelperd/internal"
 )
 
@@ -55,5 +56,27 @@ func TestHTTPDoWithHTTPTransportFailure(t *testing.T) {
 	resp := <-httpch
 	if resp.Failure == nil || !strings.HasSuffix(*resp.Failure, "mocked error") {
 		t.Fatal("not the error we expected")
+	}
+}
+func TestHTTPDoWithHTTP3(t *testing.T) {
+	ctx := context.Background()
+	wg := new(sync.WaitGroup)
+	http3ch := make(chan internal.CtrlHTTPResponse, 1)
+	wg.Add(1)
+	go internal.HTTPDo(ctx, &internal.HTTPConfig{
+		Client: &http.Client{
+			Transport: &http3.RoundTripper{},
+		},
+		Headers:           nil,
+		MaxAcceptableBody: 1 << 24,
+		Out:               http3ch,
+		URL:               "https://www.google.com",
+		Wg:                wg,
+	})
+	// wait for measurement steps to complete
+	wg.Wait()
+	resp := <-http3ch
+	if resp.Failure != nil {
+		t.Fatal(resp.Failure)
 	}
 }

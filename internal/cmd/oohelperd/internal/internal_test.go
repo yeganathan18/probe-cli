@@ -39,6 +39,27 @@ const simplerequest = `{
 	]
 }`
 
+const simplerequestnoquic = `{
+	"http_request": "https://ooni.org/",
+	"http_request_headers": {
+	  "Accept": [
+		"*/*"
+	  ],
+	  "Accept-Language": [
+		"en-US;q=0.8,en;q=0.5"
+	  ],
+	  "User-Agent": [
+		"Mozilla/5.0"
+	  ]
+	},
+	"tcp_connect": [
+	  "104.198.14.52:443"
+	],
+	"quic_handshake": [
+	  "104.198.14.52:443"
+	]
+}`
+
 const requestWithoutDomainName = `{
 	"http_request": "https://8.8.8.8",
 	"http_request_headers": {
@@ -104,6 +125,14 @@ func TestWorkingAsIntended(t *testing.T) {
 		reqMethod:       "POST",
 		reqContentType:  "application/json",
 		reqBody:         simplerequest,
+		respStatusCode:  200,
+		respContentType: "application/json",
+		parseBody:       true,
+	}, {
+		name:            "with reasonably good request to host without QUIC support",
+		reqMethod:       "POST",
+		reqContentType:  "application/json",
+		reqBody:         simplerequestnoquic,
 		respStatusCode:  200,
 		respContentType: "application/json",
 		parseBody:       true,
