@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apex/log"
+	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/ooni/probe-cli/v3/internal/cmd/oohelperd/internal"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 )
@@ -29,6 +32,9 @@ const simplerequest = `{
 	  ]
 	},
 	"tcp_connect": [
+	  "8.8.8.8:443"
+	],
+	"quic_handshake": [
 	  "8.8.8.8:443"
 	]
 }`
@@ -51,11 +57,15 @@ const requestWithoutDomainName = `{
 	]
 }`
 
+var h3client = &http.Client{Transport: &http3.RoundTripper{}}
+
 func TestWorkingAsIntended(t *testing.T) {
 	handler := internal.Handler{
 		Client:            http.DefaultClient,
 		Dialer:            new(net.Dialer),
+		H3Client:          h3client,
 		MaxAcceptableBody: 1 << 24,
+		QuicDialer:        netx.NewQUICDialer(netx.Config{Logger: log.Log}),
 		Resolver:          &netxlite.ResolverSystem{},
 	}
 	srv := httptest.NewServer(handler)

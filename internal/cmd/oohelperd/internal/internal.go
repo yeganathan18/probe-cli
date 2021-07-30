@@ -15,7 +15,9 @@ import (
 type Handler struct {
 	Client            *http.Client
 	Dialer            netx.Dialer
+	H3Client          *http.Client
 	MaxAcceptableBody int64
+	QuicDialer        netx.QUICDialer
 	Resolver          netx.Resolver
 }
 

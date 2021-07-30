@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
 )
@@ -14,7 +14,7 @@ var newfailure = archival.NewFailure
 
 // CtrlDNSResult is the result of the DNS check performed by
 // the Web Connectivity test helper.
-type CtrlDNSResult = webconnectivity.ControlDNSResult
+type CtrlDNSResult = nwebconnectivity.ControlDNSResult
 
 // DNSConfig configures the DNS check.
 type DNSConfig struct {

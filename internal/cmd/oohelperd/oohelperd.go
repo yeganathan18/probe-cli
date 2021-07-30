@@ -16,13 +16,15 @@ import (
 const maxAcceptableBody = 1 << 24
 
 var (
-	dialer    netx.Dialer
-	endpoint  = flag.String("endpoint", ":8080", "Endpoint where to listen")
-	httpx     *http.Client
-	resolver  netx.Resolver
-	srvcancel context.CancelFunc
-	srvctx    context.Context
-	srvwg     = new(sync.WaitGroup)
+	dialer     netx.Dialer
+	endpoint   = flag.String("endpoint", ":8080", "Endpoint where to listen")
+	httpx      *http.Client
+	http3x     *http.Client
+	quicdialer netx.QUICDialer
+	resolver   netx.Resolver
+	srvcancel  context.CancelFunc
+	srvctx     context.Context
+	srvwg      = new(sync.WaitGroup)
 )
 
 func init() {
@@ -30,6 +32,9 @@ func init() {
 	dialer = netx.NewDialer(netx.Config{Logger: log.Log})
 	txp := netx.NewHTTPTransport(netx.Config{Logger: log.Log})
 	httpx = &http.Client{Transport: txp}
+	txp3 := netx.NewHTTPTransport(netx.Config{Logger: log.Log, HTTP3Enabled: true})
+	http3x = &http.Client{Transport: txp3}
+	quicdialer = netx.NewQUICDialer(netx.Config{Logger: log.Log})
 	resolver = netx.NewResolver(netx.Config{Logger: log.Log})
 }
 
@@ -55,7 +60,9 @@ func testableMain() {
 	mux.Handle("/", internal.Handler{
 		Client:            httpx,
 		Dialer:            dialer,
+		H3Client:          http3x,
 		MaxAcceptableBody: maxAcceptableBody,
+		QuicDialer:        quicdialer,
 		Resolver:          resolver,
 	})
 	srv := &http.Server{Addr: *endpoint, Handler: mux}

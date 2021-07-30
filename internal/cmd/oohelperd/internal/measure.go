@@ -2,28 +2,33 @@ package internal
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
-	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
+	"github.com/lucas-clemente/quic-go"
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 )
 
 type (
 	// CtrlRequest is the request sent to the test helper
-	CtrlRequest = webconnectivity.ControlRequest
+	CtrlRequest = nwebconnectivity.ControlRequest
 
 	// CtrlResponse is the response from the test helper
-	CtrlResponse = webconnectivity.ControlResponse
+	CtrlResponse = nwebconnectivity.ControlResponse
 )
 
 // MeasureConfig contains configuration for Measure.
 type MeasureConfig struct {
 	Client            *http.Client
 	Dialer            netx.Dialer
+	H3Client          *http.Client
 	MaxAcceptableBody int64
+	QuicDialer        netx.QUICDialer
 	Resolver          netx.Resolver
 }
 
@@ -84,5 +89,54 @@ func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*Ctr
 		tcpconn := <-tcpconnch
 		cresp.TCPConnect[tcpconn.Endpoint] = tcpconn.Result
 	}
+	if !discoverH3Server(cresp.HTTPRequest, URL) {
+		return cresp, nil
+	}
+	// quichandshake: start
+	quicch := make(chan QUICResultPair, len(creq.QUICHandshake))
+	for _, endpoint := range creq.QUICHandshake {
+		wg.Add(1)
+		go QUICDo(ctx, &QUICConfig{
+			Dialer:    config.QuicDialer,
+			Endpoint:  endpoint,
+			Out:       quicch,
+			Wg:        wg,
+			QConfig:   &quic.Config{},
+			TLSConfig: &tls.Config{},
+		})
+	}
+	// http3: start
+	http3ch := make(chan CtrlHTTPResponse, 1)
+	wg.Add(1)
+	go HTTPDo(ctx, &HTTPConfig{
+		Client:            config.H3Client,
+		Headers:           creq.HTTPRequestHeaders,
+		MaxAcceptableBody: config.MaxAcceptableBody,
+		Out:               http3ch,
+		URL:               creq.HTTPRequest,
+		Wg:                wg,
+	})
+	cresp.HTTP3Request = <-http3ch
+	cresp.QUICHandshake = make(map[string]CtrlQUICResult)
+	for len(cresp.QUICHandshake) < len(creq.QUICHandshake) {
+		quichandshake := <-quicch
+		cresp.QUICHandshake[quichandshake.Endpoint] = quichandshake.Result
+	}
 	return cresp, nil
+}
+
+// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response of the control measurement
+// to check whether the server announces to support h3
+func discoverH3Server(resp CtrlHTTPResponse, URL *url.URL) (h3 bool) {
+	if URL.Scheme != "https" {
+		return false
+	}
+	alt_svc := resp.Headers["Alt-Svc"]
+	entries := strings.Split(alt_svc, ";")
+	for _, e := range entries {
+		if strings.Contains(e, "h3") {
+			return true
+		}
+	}
+	return false
 }

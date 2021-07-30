@@ -4,12 +4,12 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 )
 
 // CtrlTCPResult is the result of the TCP check performed by the test helper.
-type CtrlTCPResult = webconnectivity.ControlTCPConnectResult
+type CtrlTCPResult = nwebconnectivity.ControlTCPConnectResult
 
 // TCPResultPair contains the endpoint and the corresponding result.
 type TCPResultPair struct {

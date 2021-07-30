@@ -7,13 +7,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 )
 
 // CtrlHTTPResponse is the result of the HTTP check performed by
 // the Web Connectivity test helper.
-type CtrlHTTPResponse = webconnectivity.ControlHTTPRequestResult
+type CtrlHTTPResponse = nwebconnectivity.ControlHTTPRequestResult
 
 // HTTPConfig configures the HTTP check.
 type HTTPConfig struct {
