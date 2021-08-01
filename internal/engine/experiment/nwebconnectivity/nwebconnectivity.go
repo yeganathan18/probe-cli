@@ -3,31 +3,23 @@ package nwebconnectivity
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/apex/log"
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/http3"
-	"github.com/ooni/probe-cli/v3/internal/engine/geolocate"
 	"github.com/ooni/probe-cli/v3/internal/engine/httpheader"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
-	"github.com/ooni/psiphon/oopsi/golang.org/x/net/idna"
 	utls "gitlab.com/yawning/utls.git"
-	"golang.org/x/net/http2"
 )
 
 // Conig contains the experiment config.
@@ -238,7 +230,10 @@ func (m *Measurer) runWithRedirect(
 	}
 
 	// perform DNS lookup
-	addresses := m.dnsLookup(*measurement, ctx, URL)
+	addresses := dnsLookup(ctx, &DNSConfig{
+		Measurement: measurement,
+		URL:         URL,
+	})
 	if len(addresses) == 0 {
 		addr := net.ParseIP(URL.String())
 		if addr != nil {
@@ -328,33 +323,6 @@ func mergeAddresses(addrs []string, controlAddrs []string) []string {
 	return addrs
 }
 
-// dnsLookup finds the IP address(es) associated with a domain name
-func (m *Measurer) dnsLookup(measurement model.Measurement, ctx context.Context, URL *url.URL) []string {
-	tk := measurement.TestKeys.(*TestKeys)
-	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
-	hostname := URL.Hostname()
-	idnaHost, err := idna.ToASCII(hostname)
-	if err != nil {
-		tk.DNSExperimentFailure = archival.NewFailure(err)
-		return nil
-	}
-	addrs, err := resolver.LookupHost(ctx, idnaHost)
-	stop := time.Now()
-	for _, qtype := range []dnsQueryType{"A", "AAAA"} {
-		entry := makeDNSQueryEntry(measurement.MeasurementStartTimeSaved, stop)
-		entry.setMetadata(resolver, hostname)
-		entry.setResult(addrs, err, qtype)
-		if len(entry.Answers) <= 0 && err == nil {
-			continue
-		}
-		tk.Lock()
-		tk.Queries = append(tk.Queries, entry.DNSQueryEntry)
-		tk.Unlock()
-	}
-	tk.DNSExperimentFailure = archival.NewFailure(err)
-	return addrs
-}
-
 func (m *Measurer) measure(
 	measurement *model.Measurement,
 	ctx context.Context,
@@ -362,7 +330,11 @@ func (m *Measurer) measure(
 ) error {
 	defer mconfig.wg.Done()
 	// connect
-	conn, err := m.connect(measurement, ctx, mconfig.addr)
+	conn, err := connect(ctx, &TCPConfig{
+		Addr:        mconfig.addr,
+		Dialer:      m.dialer,
+		Measurement: measurement,
+	})
 	if err != nil {
 		return nil
 	}
@@ -376,7 +348,15 @@ func (m *Measurer) measure(
 			ServerName: mconfig.URL.Hostname(),
 			NextProtos: []string{"h2", "http/1.1"},
 		}
-		transport, err = m.tlsHandshake(measurement, ctx, conn, config, false)
+		// transport, err = tlsHandshake(measurement, ctx, conn, config, false)
+		transport, err = tlsHandshake(ctx, &TLSHandshakeConfig{
+			Conn:        conn,
+			Client:      m.fingerprintClient,
+			Handshaker:  m.handshaker,
+			Measurement: measurement,
+			SNIExample:  false,
+			TLSConf:     config,
+		})
 		// SNI example.com experiment
 		if err != nil {
 			transport, err = m.measureWithExampleSNI(measurement, ctx, mconfig)
@@ -387,7 +367,12 @@ func (m *Measurer) measure(
 	}
 
 	// HTTP roundtrip
-	err = m.httpRoundtrip(measurement, ctx, transport, mconfig)
+	err = httpRoundtrip(ctx, mconfig.redirectch, &HTTPConfig{
+		Jar:         mconfig.jar,
+		Measurement: measurement,
+		Transport:   transport,
+		URL:         mconfig.URL,
+	})
 	if err != nil {
 		return nil
 	}
@@ -397,7 +382,13 @@ func (m *Measurer) measure(
 		return nil
 	}
 	// QUIC handshake
-	transport, err = m.quicHandshake(measurement, ctx, mconfig, false)
+	transport, err = quicHandshake(ctx, &QUICConfig{
+		Addr:        mconfig.addr,
+		Dialer:      m.quicDialer,
+		Measurement: measurement,
+		SNIExample:  false,
+		URL:         mconfig.URL,
+	})
 	// SNI example.com experiment
 	if err != nil {
 		transport, err = m.measureWithExampleSNI(measurement, ctx, mconfig)
@@ -406,57 +397,22 @@ func (m *Measurer) measure(
 		return nil
 	}
 	// HTTP/3 roundtrip
-	m.httpRoundtrip(measurement, ctx, transport, mconfig)
+	httpRoundtrip(ctx, mconfig.redirectch, &HTTPConfig{
+		Jar:         mconfig.jar,
+		Measurement: measurement,
+		Transport:   transport,
+		URL:         mconfig.URL,
+	})
 
 	return nil
 }
 
-// connect performs the TCP three way handshake
-func (m *Measurer) connect(measurement *model.Measurement, ctx context.Context, addr string) (net.Conn, error) {
-	conn, err := m.dialer.DialContext(ctx, "tcp", addr)
-	stop := time.Now()
-
-	a, sport, _ := net.SplitHostPort(addr)
-	iport, _ := strconv.Atoi(sport)
-	entry := archival.TCPConnectEntry{
-		IP:   a,
-		Port: iport,
-		Status: archival.TCPConnectStatus{
-			Failure: archival.NewFailure(err),
-			Success: err == nil,
-		},
-		T: stop.Sub(measurement.MeasurementStartTimeSaved).Seconds(),
-	}
-	tk := measurement.TestKeys.(*TestKeys)
-	tk.Lock()
-	tk.TCPConnect = append(tk.TCPConnect, entry)
-	tk.Unlock()
-	return conn, err
-}
-
-// quicHandshake performs the QUIC handshake
-func (m *Measurer) quicHandshake(measurement *model.Measurement, ctx context.Context, mconfig *MeasureEndpointConfig, snitest bool) (http.RoundTripper, error) {
-	tlscfg := &tls.Config{
-		ServerName: mconfig.URL.Hostname(),
-		NextProtos: []string{"h3"},
-	}
-	qcfg := &quic.Config{}
-	qsess, err := m.quicDialer.DialContext(ctx, "udp", mconfig.addr, tlscfg, qcfg)
-	stop := time.Now()
-	entry := makeTLSHandshakeEntry(measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
-	entry.setQUICHandshakeResult(tlscfg, qsess, err)
-	tk := measurement.TestKeys.(*TestKeys)
-	tk.Lock()
-	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
-	tk.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return m.getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
-}
-
 func (m *Measurer) measureWithExampleSNI(measurement *model.Measurement, ctx context.Context, mconfig *MeasureEndpointConfig) (http.RoundTripper, error) {
-	conn, err := m.connect(measurement, ctx, mconfig.addr)
+	conn, err := connect(ctx, &TCPConfig{
+		Addr:        mconfig.addr,
+		Dialer:      m.dialer,
+		Measurement: measurement,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -464,62 +420,14 @@ func (m *Measurer) measureWithExampleSNI(measurement *model.Measurement, ctx con
 		ServerName: "example.com",
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-	return m.tlsHandshake(measurement, ctx, conn, config, true)
-}
-
-// tlsHandshake performs the TLS handshake
-func (m *Measurer) tlsHandshake(measurement *model.Measurement, ctx context.Context, conn net.Conn, config *tls.Config, snitest bool) (http.RoundTripper, error) {
-	tlsconn, state, err := m.handshaker.Handshake(ctx, conn, config)
-	stop := time.Now()
-
-	entry := makeTLSHandshakeEntry(measurement.MeasurementStartTimeSaved, stop, TCPTLSExperimentTag, snitest)
-	entry.setHandshakeResult(config, state, err)
-	entry.Fingerprint = m.fingerprintClient
-	tk := measurement.TestKeys.(*TestKeys)
-	tk.Lock()
-	tk.TLSHandshakes = append(tk.TLSHandshakes, entry.TLSHandshake)
-	tk.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return m.getTransport(state, tlsconn, config), nil
-}
-
-// httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func (m *Measurer) httpRoundtrip(measurement *model.Measurement, ctx context.Context, transport http.RoundTripper, mconfig *MeasureEndpointConfig) error {
-	req := m.getRequest(ctx, mconfig.URL, "GET", nil)
-	var redirectReq *http.Request = nil
-	httpClient := &http.Client{
-		CheckRedirect: func(r *http.Request, reqs []*http.Request) error {
-			redirectReq = r
-			return nil
-			// return http.ErrUseLastResponse
-		},
-		Jar:       mconfig.jar,
-		Transport: transport,
-	}
-	defer httpClient.CloseIdleConnections()
-
-	startHTTP := time.Now()
-	entry := makeRequestEntry(measurement.MeasurementStartTimeSaved, startHTTP)
-	entry.setRequest(ctx, req)
-	resp, err := httpClient.Do(req)
-	var reuseerr ErrNoConnReuse
-	if errors.As(err, &reuseerr) {
-		if redirectReq != nil {
-			u := m.getURL(reuseerr.location)
-			mconfig.redirectch <- &redirectInfo{location: u, req: redirectReq}
-		}
-		return err
-	}
-	entry.setFailure(err)
-	entry.setResponse(ctx, resp)
-
-	tk := measurement.TestKeys.(*TestKeys)
-	tk.Lock()
-	tk.Requests = append(tk.Requests, entry.RequestEntry)
-	tk.Unlock()
-	return nil
+	return tlsHandshake(ctx, &TLSHandshakeConfig{
+		Conn:        conn,
+		Client:      m.fingerprintClient,
+		Handshaker:  m.handshaker,
+		Measurement: measurement,
+		SNIExample:  true,
+		TLSConf:     config,
+	})
 }
 
 // getEndpoints connects IP addresses with the port associated with the URL scheme
@@ -540,117 +448,6 @@ func (m *Measurer) getEndpoints(addrs []string, scheme string) []string {
 		out = append(out, endpoint)
 	}
 	return out
-}
-
-// getEndpoints connects IP addresses with the port associated with the URL scheme
-func (m *Measurer) getURL(addr string) *url.URL {
-	a, sport, _ := net.SplitHostPort(addr)
-	var scheme string
-	switch sport {
-	case "80":
-		scheme = "http://"
-	case "443":
-		scheme = "https://"
-	}
-	ustring := scheme + a
-	u, _ := url.Parse(ustring)
-	return u
-}
-
-// getTransport determines the appropriate HTTP Transport from the ALPN
-func (m *Measurer) getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
-	// ALPN ?
-	switch state.NegotiatedProtocol {
-	case "h2":
-		// HTTP 2 + TLS.
-		return m.getHTTP2Transport(conn, config)
-	default:
-		// assume HTTP 1.x + TLS.
-		return m.getHTTPTransport(conn, config)
-	}
-}
-
-// getHTTPTransport creates an http.Transport
-func (m *Measurer) getHTTPTransport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
-	transport = &http.Transport{
-		DialContext:        (&singleDialerHTTP1{conn: &conn}).DialContext,
-		DialTLSContext:     (&singleDialerHTTP1{conn: &conn}).DialContext,
-		TLSClientConfig:    config,
-		DisableCompression: true,
-	}
-	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http.Transport)}
-	return transport
-}
-
-// getHTTP2Transport creates an http2.Transport
-func (m *Measurer) getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
-	transport = &http2.Transport{
-		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
-		TLSClientConfig:    config,
-		DisableCompression: true,
-	}
-	transport = &netxlite.HTTPTransportLogger{Logger: log.Log, HTTPTransport: transport.(*http2.Transport)}
-	return transport
-}
-
-// getHTTP3Transport creates am http3.RoundTripper
-func (m *Measurer) getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config, qcfg *quic.Config) *http3.RoundTripper {
-	transport := &http3.RoundTripper{
-		DisableCompression: true,
-		TLSClientConfig:    tlscfg,
-		QuicConfig:         qcfg,
-		Dial:               (&singleDialerH3{qsess: &qsess}).Dial,
-	}
-	return transport
-}
-
-// getRequest gives us a new HTTP GET request
-func (m *Measurer) getRequest(ctx context.Context, URL *url.URL, method string, body io.ReadCloser) *http.Request {
-	req, err := http.NewRequest(method, URL.String(), nil)
-	runtimex.PanicOnError(err, "http.NewRequest failed")
-	req = req.WithContext(ctx)
-	req.Header.Set("Accept", httpheader.Accept())
-	req.Header.Set("Accept-Language", httpheader.AcceptLanguage())
-	req.Host = URL.Hostname()
-	if body != nil {
-		req.Body = body
-	}
-	return req
-}
-
-// TODO(kelmenhorst): this part is stolen from archival.
-// decide: make archival functions public or repeat ourselves?
-type dnsQueryType string
-
-func (qtype dnsQueryType) ipoftype(addr string) bool {
-	switch qtype {
-	case "A":
-		return !strings.Contains(addr, ":")
-	case "AAAA":
-		return strings.Contains(addr, ":")
-	}
-	return false
-}
-
-func (qtype dnsQueryType) makeanswerentry(addr string) archival.DNSAnswerEntry {
-	answer := archival.DNSAnswerEntry{AnswerType: string(qtype)}
-	asn, org, _ := geolocate.LookupASN(addr)
-	answer.ASN = int64(asn)
-	answer.ASOrgName = org
-	switch qtype {
-	case "A":
-		answer.IPv4 = addr
-	case "AAAA":
-		answer.IPv6 = addr
-	}
-	return answer
-}
-
-func makePeerCerts(in []*x509.Certificate) (out []archival.MaybeBinaryValue) {
-	for _, e := range in {
-		out = append(out, archival.MaybeBinaryValue{Value: string(e.Raw)})
-	}
-	return
 }
 
 // SummaryKeys contains summary keys for this experiment.
