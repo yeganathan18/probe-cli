@@ -126,12 +126,12 @@ func (e *DNSQueryEntry) setMetadata(resolver *errorsx.ErrorWrapperResolver, host
 	e.Hostname = hostname
 }
 
-func (e *DNSQueryEntry) setResult(addrs []string, err error, qtype dnsQueryType) {
+func (e *DNSQueryEntry) setResult(addrs []string, err error, qtype archival.DNSQueryType) {
 	e.QueryType = string(qtype)
 	e.Failure = archival.NewFailure(err)
 	for _, addr := range addrs {
-		if qtype.ipoftype(addr) {
-			e.Answers = append(e.Answers, qtype.makeanswerentry(addr))
+		if qtype.IPofType(addr) {
+			e.Answers = append(e.Answers, qtype.Makeanswerentry(addr))
 		}
 	}
 }
@@ -171,6 +171,6 @@ func (e *TLSHandshake) setHandshakeResult(tlscfg *tls.Config, state tls.Connecti
 func (e *TLSHandshake) setHandshakeSuccess(tlscfg *tls.Config, state tls.ConnectionState) {
 	e.CipherSuite = netxlite.TLSCipherSuiteString(state.CipherSuite)
 	e.NegotiatedProtocol = state.NegotiatedProtocol
-	e.PeerCertificates = makePeerCerts(trace.PeerCerts(state, nil))
+	e.PeerCertificates = archival.MakePeerCerts(trace.PeerCerts(state, nil))
 	e.TLSVersion = netxlite.TLSVersionString(state.Version)
 }

@@ -388,7 +388,7 @@ type DNSQueryEntry struct {
 	T                float64          `json:"t"`
 }
 
-type dnsQueryType string
+type DNSQueryType string
 
 // NewDNSQueriesList returns a list of DNS queries.
 func NewDNSQueriesList(begin time.Time, events []trace.Event) []DNSQueryEntry {
@@ -398,12 +398,12 @@ func NewDNSQueriesList(begin time.Time, events []trace.Event) []DNSQueryEntry {
 		if ev.Name != "resolve_done" {
 			continue
 		}
-		for _, qtype := range []dnsQueryType{"A", "AAAA"} {
+		for _, qtype := range []DNSQueryType{"A", "AAAA"} {
 			entry := qtype.makequeryentry(begin, ev)
 			for _, addr := range ev.Addresses {
-				if qtype.ipoftype(addr) {
+				if qtype.IPofType(addr) {
 					entry.Answers = append(
-						entry.Answers, qtype.makeanswerentry(addr))
+						entry.Answers, qtype.Makeanswerentry(addr))
 				}
 			}
 			if len(entry.Answers) <= 0 && ev.Err == nil {
@@ -422,7 +422,7 @@ func NewDNSQueriesList(begin time.Time, events []trace.Event) []DNSQueryEntry {
 	return out
 }
 
-func (qtype dnsQueryType) ipoftype(addr string) bool {
+func (qtype DNSQueryType) IPofType(addr string) bool {
 	switch qtype {
 	case "A":
 		return !strings.Contains(addr, ":")
@@ -432,7 +432,7 @@ func (qtype dnsQueryType) ipoftype(addr string) bool {
 	return false
 }
 
-func (qtype dnsQueryType) makeanswerentry(addr string) DNSAnswerEntry {
+func (qtype DNSQueryType) Makeanswerentry(addr string) DNSAnswerEntry {
 	answer := DNSAnswerEntry{AnswerType: string(qtype)}
 	asn, org, _ := geolocate.LookupASN(addr)
 	answer.ASN = int64(asn)
@@ -446,7 +446,7 @@ func (qtype dnsQueryType) makeanswerentry(addr string) DNSAnswerEntry {
 	return answer
 }
 
-func (qtype dnsQueryType) makequeryentry(begin time.Time, ev trace.Event) DNSQueryEntry {
+func (qtype DNSQueryType) makequeryentry(begin time.Time, ev trace.Event) DNSQueryEntry {
 	return DNSQueryEntry{
 		Engine:          ev.Proto,
 		Failure:         NewFailure(ev.Err),
@@ -557,7 +557,7 @@ func NewTLSHandshakesList(begin time.Time, events []trace.Event) []TLSHandshake 
 			Failure:            NewFailure(ev.Err),
 			NegotiatedProtocol: ev.TLSNegotiatedProto,
 			NoTLSVerify:        ev.NoTLSVerify,
-			PeerCertificates:   makePeerCerts(ev.TLSPeerCerts),
+			PeerCertificates:   MakePeerCerts(ev.TLSPeerCerts),
 			ServerName:         ev.TLSServerName,
 			T:                  ev.Time.Sub(begin).Seconds(),
 			TLSVersion:         ev.TLSVersion,
@@ -566,7 +566,7 @@ func NewTLSHandshakesList(begin time.Time, events []trace.Event) []TLSHandshake 
 	return out
 }
 
-func makePeerCerts(in []*x509.Certificate) (out []MaybeBinaryValue) {
+func MakePeerCerts(in []*x509.Certificate) (out []MaybeBinaryValue) {
 	for _, e := range in {
 		out = append(out, MaybeBinaryValue{Value: string(e.Raw)})
 	}

@@ -4,7 +4,7 @@ import "testing"
 
 func TestDNSQueryIPOfType(t *testing.T) {
 	type expectation struct {
-		qtype  dnsQueryType
+		qtype  DNSQueryType
 		ip     string
 		output bool
 	}
@@ -34,7 +34,7 @@ func TestDNSQueryIPOfType(t *testing.T) {
 		output: false,
 	}}
 	for _, exp := range expectations {
-		if exp.qtype.ipoftype(exp.ip) != exp.output {
+		if exp.qtype.IPofType(exp.ip) != exp.output {
 			t.Fatalf("failure for %+v", exp)
 		}
 	}
