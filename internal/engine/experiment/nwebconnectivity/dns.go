@@ -21,14 +21,14 @@ type DNSConfig struct {
 func dnsLookup(ctx context.Context, config *DNSConfig) []string {
 	tk := config.Measurement.TestKeys.(*TestKeys)
 	var r resolver.Resolver
-	r = &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
-	r = resolver.IDNAResolver{Resolver: r}
+	r = &resolver.IDNAResolver{Resolver: &netxlite.ResolverSystem{}}
+	r = &errorsx.ErrorWrapperResolver{Resolver: r}
 	hostname := config.URL.Hostname()
 	addrs, err := r.LookupHost(ctx, hostname)
 	stop := time.Now()
 	for _, qtype := range []archival.DNSQueryType{"A", "AAAA"} {
 		entry := makeDNSQueryEntry(config.Measurement.MeasurementStartTimeSaved, stop)
-		entry.setMetadata(r, hostname)
+		entry.setMetadata(r.(*errorsx.ErrorWrapperResolver), hostname)
 		entry.setResult(addrs, err, qtype)
 		if len(entry.Answers) <= 0 && err == nil {
 			continue
