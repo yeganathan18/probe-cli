@@ -10,8 +10,8 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx/resolver"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/trace"
-	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
 )
@@ -120,9 +120,9 @@ func makeDNSQueryEntry(begin time.Time, stop time.Time) *DNSQueryEntry {
 	}}
 }
 
-func (e *DNSQueryEntry) setMetadata(resolver *errorsx.ErrorWrapperResolver, hostname string) {
-	e.Engine = resolver.Network()
-	e.ResolverAddress = resolver.Address()
+func (e *DNSQueryEntry) setMetadata(r resolver.Resolver, hostname string) {
+	e.Engine = r.(resolver.IDNAResolver).Network()
+	e.ResolverAddress = r.(resolver.IDNAResolver).Address()
 	e.Hostname = hostname
 }
 

@@ -7,9 +7,9 @@ import (
 
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
+	"github.com/ooni/probe-cli/v3/internal/engine/netx/resolver"
 	"github.com/ooni/probe-cli/v3/internal/errorsx"
 	"github.com/ooni/probe-cli/v3/internal/netxlite"
-	"golang.org/x/net/idna"
 )
 
 type DNSConfig struct {
@@ -20,18 +20,15 @@ type DNSConfig struct {
 // dnsLookup finds the IP address(es) associated with a domain name
 func dnsLookup(ctx context.Context, config *DNSConfig) []string {
 	tk := config.Measurement.TestKeys.(*TestKeys)
-	resolver := &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
+	var r resolver.Resolver
+	r = &errorsx.ErrorWrapperResolver{Resolver: &netxlite.ResolverSystem{}}
+	r = resolver.IDNAResolver{Resolver: r}
 	hostname := config.URL.Hostname()
-	idnaHost, err := idna.ToASCII(hostname)
-	if err != nil {
-		tk.DNSExperimentFailure = archival.NewFailure(err)
-		return nil
-	}
-	addrs, err := resolver.LookupHost(ctx, idnaHost)
+	addrs, err := r.LookupHost(ctx, hostname)
 	stop := time.Now()
 	for _, qtype := range []archival.DNSQueryType{"A", "AAAA"} {
 		entry := makeDNSQueryEntry(config.Measurement.MeasurementStartTimeSaved, stop)
-		entry.setMetadata(resolver, hostname)
+		entry.setMetadata(r, hostname)
 		entry.setResult(addrs, err, qtype)
 		if len(entry.Answers) <= 0 && err == nil {
 			continue
