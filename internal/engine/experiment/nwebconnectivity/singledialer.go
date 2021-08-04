@@ -10,12 +10,12 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
-type singleDialerHTTP1 struct {
+type SingleDialerHTTP1 struct {
 	sync.Mutex
 	conn *net.Conn
 }
 
-func (s *singleDialerHTTP1) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+func (s *SingleDialerHTTP1) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
@@ -26,12 +26,12 @@ func (s *singleDialerHTTP1) DialContext(ctx context.Context, network string, add
 	return *c, nil
 }
 
-type singleDialerH2 struct {
+type SingleDialerH2 struct {
 	sync.Mutex
 	conn *net.Conn
 }
 
-func (s *singleDialerH2) DialTLS(network string, addr string, cfg *tls.Config) (net.Conn, error) {
+func (s *SingleDialerH2) DialTLS(network string, addr string, cfg *tls.Config) (net.Conn, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.conn == nil {
@@ -42,12 +42,12 @@ func (s *singleDialerH2) DialTLS(network string, addr string, cfg *tls.Config) (
 	return *c, nil
 }
 
-type singleDialerH3 struct {
+type SingleDialerH3 struct {
 	sync.Mutex
 	qsess *quic.EarlySession
 }
 
-func (s *singleDialerH3) Dial(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
+func (s *SingleDialerH3) Dial(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.qsess == nil {

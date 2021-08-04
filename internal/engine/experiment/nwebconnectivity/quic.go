@@ -40,16 +40,16 @@ func quicHandshake(ctx context.Context, config *QUICConfig) (http.RoundTripper, 
 	if err != nil {
 		return nil, err
 	}
-	return getHTTP3Transport(qsess, tlscfg, &quic.Config{}), nil
+	return GetSingleH3Transport(qsess, tlscfg, qcfg), nil
 }
 
 // getHTTP3Transport creates am http3.RoundTripper
-func getHTTP3Transport(qsess quic.EarlySession, tlscfg *tls.Config, qcfg *quic.Config) *http3.RoundTripper {
+func GetSingleH3Transport(qsess quic.EarlySession, tlscfg *tls.Config, qcfg *quic.Config) *http3.RoundTripper {
 	transport := &http3.RoundTripper{
 		DisableCompression: true,
 		TLSClientConfig:    tlscfg,
 		QuicConfig:         qcfg,
-		Dial:               (&singleDialerH3{qsess: &qsess}).Dial,
+		Dial:               (&SingleDialerH3{qsess: &qsess}).Dial,
 	}
 	return transport
 }

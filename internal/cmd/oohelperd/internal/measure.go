@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,18 @@ type (
 
 	// CtrlResponse is the response from the test helper
 	CtrlResponse = nwebconnectivity.ControlResponse
+
+	CtrlURLMeasurement = nwebconnectivity.ControlURL
+
+	CtrlEndpointMeasurement = nwebconnectivity.ControlEndpoint
+
+	CtrlHTTPMeasurement = nwebconnectivity.ControlHTTP
+
+	CtrlH3Measurement = nwebconnectivity.ControlH3
+
+	CtrlTLSMeasurement = nwebconnectivity.ControlTLSHandshake
+
+	CtrlHTTPRequest = nwebconnectivity.ControlHTTPRequest
 )
 
 // MeasureConfig contains configuration for Measure.
@@ -33,93 +46,141 @@ type MeasureConfig struct {
 
 // Measure performs the measurement described by the request and
 // returns the corresponding response or an error.
-func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*CtrlResponse, error) {
+func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*CtrlURLMeasurement, error) {
 	// parse input for correctness
 	URL, err := url.Parse(creq.HTTPRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	// create URLMeasurement struct
+	urlMeasurement := &CtrlURLMeasurement{
+		URL:       URL.String(),
+		DNS:       nil,
+		Endpoints: []CtrlEndpointMeasurement{},
+	}
+
 	// dns: start
+	dns := DNSDo(ctx, &DNSConfig{
+		Domain:   URL.Hostname(),
+		Resolver: config.Resolver,
+	})
+
+	urlMeasurement.DNS = &dns
+
+	enpnts := getEndpoints(dns.Addrs, URL)
+	addrs := mergeEndpoints(enpnts, creq.TCPConnect)
+
+	if len(addrs) == 0 {
+		return urlMeasurement, errors.New("no valid IP address to measure")
+	}
+
 	wg := new(sync.WaitGroup)
-	dnsch := make(chan CtrlDNSResult, 1)
-	if net.ParseIP(URL.Hostname()) == nil {
+	for _, endpoint := range enpnts {
+		var endpointMeasurement CtrlEndpointMeasurement = &nwebconnectivity.ControlHTTP{Endpoint: endpoint, Protocol: URL.Scheme}
 		wg.Add(1)
-		go DNSDo(ctx, &DNSConfig{
-			Domain:   URL.Hostname(),
-			Out:      dnsch,
-			Resolver: config.Resolver,
-			Wg:       wg,
-		})
+		go measureHTTP(ctx, config, creq, endpoint, endpointMeasurement.(*CtrlHTTPMeasurement), wg)
+		urlMeasurement.Endpoints = append(urlMeasurement.Endpoints, endpointMeasurement)
 	}
-	// tcpconnect: start
-	tcpconnch := make(chan TCPResultPair, len(creq.TCPConnect))
-	for _, endpoint := range creq.TCPConnect {
-		wg.Add(1)
-		go TCPDo(ctx, &TCPConfig{
-			Dialer:   config.Dialer,
+	wg.Wait()
+	return urlMeasurement, nil
+}
+
+func measureHTTP(ctx context.Context, config MeasureConfig, creq *CtrlRequest, endpoint string, httpMeasurement *CtrlHTTPMeasurement, wg *sync.WaitGroup) {
+	defer wg.Done()
+	var conn net.Conn
+	conn, httpMeasurement.TCPConnect = TCPDo(ctx, &TCPConfig{
+		Dialer:   config.Dialer,
+		Endpoint: endpoint,
+	})
+	if conn == nil {
+		return
+	}
+
+	URL, _ := url.Parse(creq.HTTPRequest)
+	switch URL.Scheme {
+	case "http":
+		config.Client.Transport = nwebconnectivity.GetSingleTransport(nil, conn, nil)
+	case "https":
+		var tlsconn *tls.Conn
+		cfg := &tls.Config{ServerName: URL.Hostname()}
+		tlsconn, httpMeasurement.TLSHandshake = TLSDo(ctx, &TLSConfig{
+			Conn:     conn,
 			Endpoint: endpoint,
-			Out:      tcpconnch,
-			Wg:       wg,
+			Cfg:      cfg,
 		})
+		if tlsconn == nil {
+			return
+		}
+		state := tlsconn.ConnectionState()
+		config.Client.Transport = nwebconnectivity.GetSingleTransport(&state, tlsconn, cfg)
 	}
-	// http: start
-	httpch := make(chan CtrlHTTPResponse, 1)
-	wg.Add(1)
-	go HTTPDo(ctx, &HTTPConfig{
+	httpMeasurement.HTTPRequest = HTTPDo(ctx, &HTTPConfig{
 		Client:            config.Client,
 		Headers:           creq.HTTPRequestHeaders,
 		MaxAcceptableBody: config.MaxAcceptableBody,
-		Out:               httpch,
 		URL:               creq.HTTPRequest,
-		Wg:                wg,
 	})
-	// wait for measurement steps to complete
-	wg.Wait()
-	// assemble response
-	cresp := new(CtrlResponse)
-	select {
-	case cresp.DNS = <-dnsch:
-	default:
-		// we land here when there's no domain name
-	}
-	cresp.HTTPRequest = <-httpch
-	cresp.TCPConnect = make(map[string]CtrlTCPResult)
-	for len(cresp.TCPConnect) < len(creq.TCPConnect) {
-		tcpconn := <-tcpconnch
-		cresp.TCPConnect[tcpconn.Endpoint] = tcpconn.Result
-	}
-	if !discoverH3Server(cresp.HTTPRequest, URL) {
-		return cresp, nil
-	}
-	// quichandshake: start
-	quicch := make(chan QUICResultPair, len(creq.QUICHandshake))
-	for _, endpoint := range creq.QUICHandshake {
-		wg.Add(1)
-		go QUICDo(ctx, &QUICConfig{
-			Dialer:    config.QuicDialer,
-			Endpoint:  endpoint,
-			Out:       quicch,
-			Wg:        wg,
-			QConfig:   &quic.Config{},
-			TLSConfig: &tls.Config{},
-		})
-	}
-	// http3: start
-	http3ch := make(chan CtrlHTTPResponse, 1)
-	wg.Add(1)
-	go HTTPDo(ctx, &HTTPConfig{
-		Client:            config.H3Client,
+	conn.Close()
+}
+
+func measureH3(ctx context.Context, config MeasureConfig, creq *CtrlRequest, endpoint string, h3Measurement *CtrlH3Measurement, wg *sync.WaitGroup) {
+	defer wg.Done()
+	var sess quic.EarlySession
+	tlscfg := &tls.Config{}
+	qcfg := &quic.Config{}
+	sess, h3Measurement.QUICHandshake = QUICDo(ctx, &QUICConfig{
+		Dialer:    config.QuicDialer,
+		Endpoint:  endpoint,
+		QConfig:   qcfg,
+		TLSConfig: tlscfg,
+	})
+	transport := nwebconnectivity.GetSingleH3Transport(sess, tlscfg, qcfg)
+	config.Client.Transport = transport
+	HTTPDo(ctx, &HTTPConfig{
+		Client:            config.Client,
 		Headers:           creq.HTTPRequestHeaders,
 		MaxAcceptableBody: config.MaxAcceptableBody,
-		Out:               http3ch,
 		URL:               creq.HTTPRequest,
-		Wg:                wg,
 	})
-	cresp.HTTP3Request = <-http3ch
-	cresp.QUICHandshake = make(map[string]CtrlQUICResult)
-	for len(cresp.QUICHandshake) < len(creq.QUICHandshake) {
-		quichandshake := <-quicch
-		cresp.QUICHandshake[quichandshake.Endpoint] = quichandshake.Result
+
+}
+
+func mergeEndpoints(addrs []string, clientAddrs []string) []string {
+	appendIfUnique := func(slice []string, item string) []string {
+		for _, i := range slice {
+			if i == item {
+				return slice
+			}
+		}
+		return append(slice, item)
 	}
-	return cresp, nil
+	for _, c := range clientAddrs {
+		addrs = appendIfUnique(addrs, c)
+	}
+	return addrs
+}
+
+// getEndpoints connects IP addresses with the port associated with the URL scheme
+func getEndpoints(addrs []string, URL *url.URL) []string {
+	out := []string{}
+	if URL.Scheme != "http" && URL.Scheme != "https" {
+		panic("passed an unexpected scheme")
+	}
+	_, p, err := net.SplitHostPort(URL.String())
+	for _, a := range addrs {
+		var port string
+		switch true {
+		case err == nil:
+			// explicit port
+			port = p
+		case URL.Scheme == "http":
+			port = "80"
+		case URL.Scheme == "https":
+			port = "443"
+		}
+		endpoint := net.JoinHostPort(a, port)
+		out = append(out, endpoint)
+	}
+	return out
 }

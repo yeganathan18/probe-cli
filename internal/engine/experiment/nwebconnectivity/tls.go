@@ -38,11 +38,14 @@ func tlsHandshake(ctx context.Context, config *TLSHandshakeConfig) (http.RoundTr
 	if err != nil {
 		return nil, err
 	}
-	return getTransport(state, tlsconn, config.TLSConf), nil
+	return GetSingleTransport(&state, tlsconn, config.TLSConf), nil
 }
 
 // getTransport determines the appropriate HTTP Transport from the ALPN
-func getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
+func GetSingleTransport(state *tls.ConnectionState, conn net.Conn, config *tls.Config) http.RoundTripper {
+	if state == nil {
+		return netxlite.NewHTTPTransport(&SingleDialerHTTP1{conn: &conn}, nil, nil)
+	}
 	// ALPN ?
 	switch state.NegotiatedProtocol {
 	case "h2":
@@ -57,8 +60,8 @@ func getTransport(state tls.ConnectionState, conn net.Conn, config *tls.Config) 
 // getHTTPTransport creates an http.Transport
 func getHTTPTransport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
 	transport = &http.Transport{
-		DialContext:        (&singleDialerHTTP1{conn: &conn}).DialContext,
-		DialTLSContext:     (&singleDialerHTTP1{conn: &conn}).DialContext,
+		DialContext:        (&SingleDialerHTTP1{conn: &conn}).DialContext,
+		DialTLSContext:     (&SingleDialerHTTP1{conn: &conn}).DialContext,
 		TLSClientConfig:    config,
 		DisableCompression: true,
 	}
@@ -69,7 +72,7 @@ func getHTTPTransport(conn net.Conn, config *tls.Config) (transport http.RoundTr
 // getHTTP2Transport creates an http2.Transport
 func getHTTP2Transport(conn net.Conn, config *tls.Config) (transport http.RoundTripper) {
 	transport = &http2.Transport{
-		DialTLS:            (&singleDialerH2{conn: &conn}).DialTLS,
+		DialTLS:            (&SingleDialerH2{conn: &conn}).DialTLS,
 		TLSClientConfig:    config,
 		DisableCompression: true,
 	}

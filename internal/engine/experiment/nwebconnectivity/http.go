@@ -35,6 +35,7 @@ func httpRoundtrip(ctx context.Context, redirectch chan *redirectInfo, config *H
 		Jar:       config.Jar,
 		Transport: config.Transport,
 	}
+	// TODO!!?
 	defer httpClient.CloseIdleConnections()
 
 	startHTTP := time.Now()

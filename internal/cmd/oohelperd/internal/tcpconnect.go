@@ -2,41 +2,25 @@ package internal
 
 import (
 	"context"
-	"sync"
+	"net"
 
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 )
 
 // CtrlTCPResult is the result of the TCP check performed by the test helper.
-type CtrlTCPResult = nwebconnectivity.ControlTCPConnectResult
-
-// TCPResultPair contains the endpoint and the corresponding result.
-type TCPResultPair struct {
-	Endpoint string
-	Result   CtrlTCPResult
-}
+type CtrlTCPResult = nwebconnectivity.ControlTCPConnect
 
 // TCPConfig configures the TCP connect check.
 type TCPConfig struct {
 	Dialer   netx.Dialer
 	Endpoint string
-	Out      chan TCPResultPair
-	Wg       *sync.WaitGroup
 }
 
 // TCPDo performs the TCP check.
-func TCPDo(ctx context.Context, config *TCPConfig) {
-	defer config.Wg.Done()
+func TCPDo(ctx context.Context, config *TCPConfig) (net.Conn, *CtrlTCPResult) {
 	conn, err := config.Dialer.DialContext(ctx, "tcp", config.Endpoint)
-	if conn != nil {
-		conn.Close()
-	}
-	config.Out <- TCPResultPair{
-		Endpoint: config.Endpoint,
-		Result: CtrlTCPResult{
-			Failure: newfailure(err),
-			Status:  err == nil,
-		},
+	return conn, &CtrlTCPResult{
+		Failure: newfailure(err),
 	}
 }
