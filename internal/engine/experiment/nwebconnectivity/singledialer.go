@@ -3,7 +3,6 @@ package nwebconnectivity
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"net"
 	"sync"
 
@@ -51,7 +50,7 @@ func (s *SingleDialerH3) Dial(network, addr string, tlsCfg *tls.Config, cfg *qui
 	s.Lock()
 	defer s.Unlock()
 	if s.qsess == nil {
-		return nil, errors.New("cannot reuse session")
+		return nil, ErrNoConnReuse{location: addr}
 	}
 	qs := s.qsess
 	s.qsess = nil
