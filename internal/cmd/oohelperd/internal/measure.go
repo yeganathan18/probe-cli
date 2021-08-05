@@ -44,9 +44,50 @@ type MeasureConfig struct {
 	Resolver          netx.Resolver
 }
 
+func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*CtrlResponse, error) {
+	var cresp = CtrlResponse{URLMeasurements: []*CtrlURLMeasurement{}}
+	redirectch := make(chan *RedirectInfo, 20)
+	nRedirects := 0
+
+	urlM, _ := MeasureURL(ctx, config, creq, redirectch)
+	cresp.URLMeasurements = append(cresp.URLMeasurements, urlM)
+
+	redirected := make(map[string]bool, 21)
+	rdrctreqs := reduceRedirects(redirectch, redirected)
+
+	for len(rdrctreqs) > nRedirects {
+		req := rdrctreqs[nRedirects]
+		if nRedirects == 20 {
+			// we stop after 20 redirects, as do Chrome and Firefox, TODO(kelmenhorst): how do we test this?
+			// TODO(kelmenhorst): do we need another entry indicating the redirect failure here?
+			break
+		}
+		nRedirects += 1
+		redirectch = make(chan *RedirectInfo, 20)
+		urlM, _ = MeasureURL(ctx, config, req, redirectch)
+		cresp.URLMeasurements = append(cresp.URLMeasurements, urlM)
+		rdrctreqs = append(rdrctreqs, reduceRedirects(redirectch, redirected)...)
+	}
+	return &cresp, nil
+}
+
+func reduceRedirects(redirectch chan *RedirectInfo, redirected map[string]bool) []*CtrlRequest {
+	out := []*CtrlRequest{}
+	for rdrct := range redirectch {
+		if _, ok := redirected[rdrct.Location.String()]; ok {
+			continue
+		}
+		redirected[rdrct.Location.String()] = true
+		req := &CtrlRequest{HTTPRequest: rdrct.Location.String(), TCPConnect: []string{}, HTTPRequestHeaders: rdrct.Req.Header}
+		out = append(out, req)
+	}
+	return out
+}
+
 // Measure performs the measurement described by the request and
 // returns the corresponding response or an error.
-func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*CtrlURLMeasurement, error) {
+func MeasureURL(ctx context.Context, config MeasureConfig, creq *CtrlRequest, redirectch chan *RedirectInfo) (*CtrlURLMeasurement, error) {
+	defer close(redirectch)
 	// parse input for correctness
 	URL, err := url.Parse(creq.HTTPRequest)
 	if err != nil {
@@ -79,14 +120,22 @@ func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*Ctr
 	for _, endpoint := range enpnts {
 		var endpointMeasurement CtrlEndpointMeasurement = &nwebconnectivity.ControlHTTP{Endpoint: endpoint, Protocol: URL.Scheme}
 		wg.Add(1)
-		go measureHTTP(ctx, config, creq, endpoint, endpointMeasurement.(*CtrlHTTPMeasurement), wg)
+		go measureHTTP(ctx, config, creq, endpoint, endpointMeasurement.(*CtrlHTTPMeasurement), wg, redirectch)
 		urlMeasurement.Endpoints = append(urlMeasurement.Endpoints, endpointMeasurement)
 	}
 	wg.Wait()
 	return urlMeasurement, nil
 }
 
-func measureHTTP(ctx context.Context, config MeasureConfig, creq *CtrlRequest, endpoint string, httpMeasurement *CtrlHTTPMeasurement, wg *sync.WaitGroup) {
+func measureHTTP(
+	ctx context.Context,
+	config MeasureConfig,
+	creq *CtrlRequest,
+	endpoint string,
+	httpMeasurement *CtrlHTTPMeasurement,
+	wg *sync.WaitGroup,
+	redirectch chan *RedirectInfo,
+) {
 	defer wg.Done()
 	var conn net.Conn
 	conn, httpMeasurement.TCPConnect = TCPDo(ctx, &TCPConfig{
@@ -120,11 +169,19 @@ func measureHTTP(ctx context.Context, config MeasureConfig, creq *CtrlRequest, e
 		Headers:           creq.HTTPRequestHeaders,
 		MaxAcceptableBody: config.MaxAcceptableBody,
 		URL:               creq.HTTPRequest,
-	})
+	}, redirectch)
 	conn.Close()
 }
 
-func measureH3(ctx context.Context, config MeasureConfig, creq *CtrlRequest, endpoint string, h3Measurement *CtrlH3Measurement, wg *sync.WaitGroup) {
+func measureH3(
+	ctx context.Context,
+	config MeasureConfig,
+	creq *CtrlRequest,
+	endpoint string,
+	h3Measurement *CtrlH3Measurement,
+	wg *sync.WaitGroup,
+	redirectch chan *RedirectInfo,
+) {
 	defer wg.Done()
 	var sess quic.EarlySession
 	tlscfg := &tls.Config{}
@@ -137,12 +194,12 @@ func measureH3(ctx context.Context, config MeasureConfig, creq *CtrlRequest, end
 	})
 	transport := nwebconnectivity.GetSingleH3Transport(sess, tlscfg, qcfg)
 	config.Client.Transport = transport
-	HTTPDo(ctx, &HTTPConfig{
+	h3Measurement.HTTPRequest = HTTPDo(ctx, &HTTPConfig{
 		Client:            config.Client,
 		Headers:           creq.HTTPRequestHeaders,
 		MaxAcceptableBody: config.MaxAcceptableBody,
 		URL:               creq.HTTPRequest,
-	})
+	}, redirectch)
 
 }
 
@@ -167,11 +224,11 @@ func getEndpoints(addrs []string, URL *url.URL) []string {
 	if URL.Scheme != "http" && URL.Scheme != "https" {
 		panic("passed an unexpected scheme")
 	}
-	_, p, err := net.SplitHostPort(URL.String())
+	p := URL.Port()
 	for _, a := range addrs {
 		var port string
 		switch true {
-		case err == nil:
+		case p != "":
 			// explicit port
 			port = p
 		case URL.Scheme == "http":

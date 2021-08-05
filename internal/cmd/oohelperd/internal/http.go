@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 )
+
+type RedirectInfo = nwebconnectivity.RedirectInfo
 
 // HTTPConfig configures the HTTP check.
 type HTTPConfig struct {
@@ -18,7 +21,7 @@ type HTTPConfig struct {
 }
 
 // HTTPDo performs the HTTP check.
-func HTTPDo(ctx context.Context, config *HTTPConfig) *CtrlHTTPRequest {
+func HTTPDo(ctx context.Context, config *HTTPConfig, redirectch chan *RedirectInfo) *CtrlHTTPRequest {
 	req, err := http.NewRequestWithContext(ctx, "GET", config.URL, nil)
 	if err != nil {
 		return &CtrlHTTPRequest{Failure: newfailure(err)}
@@ -35,9 +38,18 @@ func HTTPDo(ctx context.Context, config *HTTPConfig) *CtrlHTTPRequest {
 			}
 		}
 	}
+	var redirectReq *http.Request
+	config.Client.CheckRedirect = func(r *http.Request, reqs []*http.Request) error {
+		redirectReq = r
+		return http.ErrUseLastResponse
+	}
 	resp, err := config.Client.Do(req)
 	if err != nil {
 		return &CtrlHTTPRequest{Failure: newfailure(err)}
+	}
+	loc, _ := resp.Location()
+	if loc != nil && redirectReq != nil {
+		redirectch <- &RedirectInfo{Location: loc, Req: redirectReq}
 	}
 	defer resp.Body.Close()
 	headers := make(map[string]string)

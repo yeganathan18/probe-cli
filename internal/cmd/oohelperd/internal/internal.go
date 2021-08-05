@@ -45,9 +45,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	measureConfig := MeasureConfig(h)
-	var cresp = CtrlResponse{URLMeasurements: []*CtrlURLMeasurement{}}
-	urlM, err := Measure(req.Context(), measureConfig, &creq)
-	cresp.URLMeasurements = append(cresp.URLMeasurements, urlM)
+	cresp, err := Measure(req.Context(), measureConfig, &creq)
 	if err != nil {
 		w.WriteHeader(400)
 		return
