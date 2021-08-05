@@ -129,14 +129,6 @@ func TestWorkingAsIntended(t *testing.T) {
 		respContentType: "application/json",
 		parseBody:       true,
 	}, {
-		name:            "with reasonably good request to host without QUIC support",
-		reqMethod:       "POST",
-		reqContentType:  "application/json",
-		reqBody:         simplerequestnoquic,
-		respStatusCode:  200,
-		respContentType: "application/json",
-		parseBody:       true,
-	}, {
 		name:            "when there's no domain name in the request",
 		reqMethod:       "POST",
 		reqContentType:  "application/json",

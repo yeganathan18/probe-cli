@@ -49,7 +49,10 @@ func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*Ctr
 	redirectch := make(chan *RedirectInfo, 20)
 	nRedirects := 0
 
-	urlM, _ := MeasureURL(ctx, config, creq, redirectch)
+	urlM, err := MeasureURL(ctx, config, creq, redirectch)
+	if err != nil {
+		return nil, err
+	}
 	cresp.URLMeasurements = append(cresp.URLMeasurements, urlM)
 
 	redirected := make(map[string]bool, 21)
@@ -64,7 +67,10 @@ func Measure(ctx context.Context, config MeasureConfig, creq *CtrlRequest) (*Ctr
 		}
 		nRedirects += 1
 		redirectch = make(chan *RedirectInfo, 20)
-		urlM, _ = MeasureURL(ctx, config, req, redirectch)
+		urlM, err = MeasureURL(ctx, config, req, redirectch)
+		if err != nil {
+			return nil, err
+		}
 		cresp.URLMeasurements = append(cresp.URLMeasurements, urlM)
 		rdrctreqs = append(rdrctreqs, reduceRedirects(redirectch, redirected)...)
 	}
@@ -113,7 +119,7 @@ func MeasureURL(ctx context.Context, config MeasureConfig, creq *CtrlRequest, re
 	addrs := mergeEndpoints(enpnts, creq.TCPConnect)
 
 	if len(addrs) == 0 {
-		return urlMeasurement, errors.New("no valid IP address to measure")
+		return nil, errors.New("no valid IP address to measure")
 	}
 
 	wg := new(sync.WaitGroup)
