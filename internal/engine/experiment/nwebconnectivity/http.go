@@ -2,7 +2,6 @@ package nwebconnectivity
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -23,14 +22,13 @@ type HTTPConfig struct {
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func httpRoundtrip(ctx context.Context, redirectch chan *redirectInfo, config *HTTPConfig) error {
+func httpRoundtrip(ctx context.Context, redirectch chan *RedirectInfo, config *HTTPConfig) {
 	req := getRequest(ctx, config.URL, "GET", nil)
 	var redirectReq *http.Request = nil
 	httpClient := &http.Client{
 		CheckRedirect: func(r *http.Request, reqs []*http.Request) error {
 			redirectReq = r
-			return nil
-			// return http.ErrUseLastResponse
+			return http.ErrUseLastResponse
 		},
 		Jar:       config.Jar,
 		Transport: config.Transport,
@@ -41,14 +39,6 @@ func httpRoundtrip(ctx context.Context, redirectch chan *redirectInfo, config *H
 	entry := makeRequestEntry(config.Measurement.MeasurementStartTimeSaved, startHTTP)
 	entry.setRequest(ctx, req)
 	resp, err := httpClient.Do(req)
-	var reuseerr ErrNoConnReuse
-	if errors.As(err, &reuseerr) {
-		if redirectReq != nil {
-			u := getURL(reuseerr.location)
-			redirectch <- &redirectInfo{location: u, req: redirectReq}
-		}
-		return err
-	}
 	entry.setFailure(err)
 	entry.setResponse(ctx, resp)
 
@@ -56,7 +46,14 @@ func httpRoundtrip(ctx context.Context, redirectch chan *redirectInfo, config *H
 	tk.Lock()
 	tk.Requests = append(tk.Requests, entry.RequestEntry)
 	tk.Unlock()
-	return nil
+
+	if resp == nil {
+		return
+	}
+	loc, _ := resp.Location()
+	if loc != nil && redirectReq != nil {
+		redirectch <- &RedirectInfo{Jar: config.Jar, Location: loc, Req: redirectReq}
+	}
 }
 
 // getRequest gives us a new HTTP GET request
