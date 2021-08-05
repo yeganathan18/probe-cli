@@ -3,8 +3,6 @@ package internal
 import (
 	"context"
 	"crypto/tls"
-	"net/url"
-	"strings"
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
@@ -24,20 +22,4 @@ func QUICDo(ctx context.Context, config *QUICConfig) (quic.EarlySession, *CtrlTL
 	return sess, &CtrlTLSMeasurement{
 		Failure: newfailure(err),
 	}
-}
-
-// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response of the control measurement
-// to check whether the server announces to support h3
-func discoverH3Server(resp CtrlHTTPRequest, URL *url.URL) (h3 bool) {
-	if URL.Scheme != "https" {
-		return false
-	}
-	alt_svc := resp.Headers["Alt-Svc"]
-	entries := strings.Split(alt_svc, ";")
-	for _, e := range entries {
-		if strings.Contains(e, "h3") {
-			return true
-		}
-	}
-	return false
 }

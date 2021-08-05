@@ -11,7 +11,7 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/cmd/oohelperd/internal"
 )
 
-var redirectch = make(chan *internal.RedirectInfo)
+var nexturlch = make(chan *internal.NextLocationInfo)
 
 func TestHTTPDoWithInvalidURL(t *testing.T) {
 	ctx := context.Background()
@@ -20,7 +20,7 @@ func TestHTTPDoWithInvalidURL(t *testing.T) {
 		Headers:           nil,
 		MaxAcceptableBody: 1 << 24,
 		URL:               "http://[::1]aaaa",
-	}, redirectch)
+	}, nexturlch)
 	if resp.Failure == nil || !strings.HasSuffix(*resp.Failure, `invalid port "aaaa" after host`) {
 		t.Fatal("not the failure we expected")
 	}
@@ -38,7 +38,7 @@ func TestHTTPDoWithHTTPTransportFailure(t *testing.T) {
 		Headers:           nil,
 		MaxAcceptableBody: 1 << 24,
 		URL:               "http://www.x.org",
-	}, redirectch)
+	}, nexturlch)
 	if resp.Failure == nil || !strings.HasSuffix(*resp.Failure, "mocked error") {
 		t.Fatal("not the error we expected")
 	}
@@ -53,7 +53,7 @@ func TestHTTPDoWithHTTP3(t *testing.T) {
 		Headers:           nil,
 		MaxAcceptableBody: 1 << 24,
 		URL:               "https://www.google.com",
-	}, redirectch)
+	}, nexturlch)
 	if resp.Failure != nil {
 		t.Fatal(resp.Failure)
 	}

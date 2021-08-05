@@ -22,7 +22,7 @@ type HTTPConfig struct {
 }
 
 // httpRoundtrip constructs the HTTP request and HTTP client and performs the HTTP Roundtrip with the given transport
-func httpRoundtrip(ctx context.Context, redirectch chan *RedirectInfo, config *HTTPConfig) {
+func httpRoundtrip(ctx context.Context, redirectch chan *NextLocationInfo, config *HTTPConfig) {
 	req := getRequest(ctx, config.URL, "GET", nil)
 	var redirectReq *http.Request = nil
 	httpClient := &http.Client{
@@ -52,7 +52,7 @@ func httpRoundtrip(ctx context.Context, redirectch chan *RedirectInfo, config *H
 	}
 	loc, _ := resp.Location()
 	if loc != nil && redirectReq != nil {
-		redirectch <- &RedirectInfo{Jar: config.Jar, Location: loc, Req: redirectReq}
+		redirectch <- &NextLocationInfo{Jar: config.Jar, Location: loc, HTTPRedirectReq: redirectReq}
 	}
 }
 

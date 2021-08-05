@@ -4,13 +4,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 )
 
-type RedirectInfo = nwebconnectivity.RedirectInfo
+type NextLocationInfo = nwebconnectivity.NextLocationInfo
 
 // HTTPConfig configures the HTTP check.
 type HTTPConfig struct {
@@ -21,7 +22,7 @@ type HTTPConfig struct {
 }
 
 // HTTPDo performs the HTTP check.
-func HTTPDo(ctx context.Context, config *HTTPConfig, redirectch chan *RedirectInfo) *CtrlHTTPRequest {
+func HTTPDo(ctx context.Context, config *HTTPConfig, nexturlch chan *NextLocationInfo) *CtrlHTTPRequest {
 	req, err := http.NewRequestWithContext(ctx, "GET", config.URL, nil)
 	if err != nil {
 		return &CtrlHTTPRequest{Failure: newfailure(err)}
@@ -49,7 +50,7 @@ func HTTPDo(ctx context.Context, config *HTTPConfig, redirectch chan *RedirectIn
 	}
 	loc, _ := resp.Location()
 	if loc != nil && redirectReq != nil {
-		redirectch <- &RedirectInfo{Location: loc, Req: redirectReq}
+		nexturlch <- &NextLocationInfo{Location: loc, HTTPRedirectReq: redirectReq}
 	}
 	defer resp.Body.Close()
 	headers := make(map[string]string)
@@ -64,4 +65,30 @@ func HTTPDo(ctx context.Context, config *HTTPConfig, redirectch chan *RedirectIn
 		StatusCode: int64(resp.StatusCode),
 		Headers:    headers,
 	}
+}
+
+// discoverH3Server inspects the Alt-Svc Header of the HTTP (over TCP) response of the control measurement
+// to check whether the server announces to support h3
+func discoverH3Server(resp CtrlEndpointMeasurement, URL *url.URL) string {
+	if _, ok := resp.(*CtrlHTTPMeasurement); !ok {
+		return ""
+	}
+	r := resp.(*CtrlHTTPMeasurement).HTTPRequest
+	if r == nil {
+		return ""
+	}
+	if URL.Scheme != "https" {
+		return ""
+	}
+	alt_svc := r.Headers["Alt-Svc"]
+	entries := strings.Split(alt_svc, ";")
+	for _, e := range entries {
+		if strings.Contains(e, "h3=") {
+			return "h3"
+		}
+		if strings.Contains(e, "h3-29=") {
+			return "h3-29"
+		}
+	}
+	return ""
 }
