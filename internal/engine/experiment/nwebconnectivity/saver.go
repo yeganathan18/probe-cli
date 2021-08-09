@@ -140,10 +140,7 @@ type TLSHandshake struct {
 	archival.TLSHandshake
 }
 
-func makeTLSHandshakeEntry(begin time.Time, stop time.Time, protoTag string, examplesni bool) *TLSHandshake {
-	if examplesni {
-		protoTag = protoTag + "_example"
-	}
+func makeTLSHandshakeEntry(begin time.Time, stop time.Time, protoTag string) *TLSHandshake {
 	return &TLSHandshake{archival.TLSHandshake{
 		T:    stop.Sub(begin).Seconds(),
 		Tags: []string{protoTag},

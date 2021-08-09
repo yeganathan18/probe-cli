@@ -1,4 +1,4 @@
-package internal
+package nwcth
 
 import (
 	"encoding/json"
@@ -6,21 +6,17 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/iox"
 	"github.com/ooni/probe-cli/v3/internal/runtimex"
 	"github.com/ooni/probe-cli/v3/internal/version"
 )
 
-// Handler implements the Web Connectivity test helper HTTP API.
-type Handler struct {
-	Client            *http.Client
-	Dialer            netx.Dialer
-	MaxAcceptableBody int64
-	Resolver          netx.Resolver
-}
+const maxAcceptableBody = 1 << 24
 
-func (h Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+// Handler implements the Web Connectivity test helper HTTP API.
+type NWCTHHandler struct{}
+
+func (h NWCTHHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add("Server", fmt.Sprintf(
 		"oohelperd/%s ooniprobe-engine/%s", version.Version, version.Version,
 	))
@@ -28,7 +24,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	reader := &io.LimitedReader{R: req.Body, N: h.MaxAcceptableBody}
+	reader := &io.LimitedReader{R: req.Body, N: maxAcceptableBody}
 	data, err := iox.ReadAllContext(req.Context(), reader)
 	if err != nil {
 		w.WriteHeader(400)
@@ -39,8 +35,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	measureConfig := MeasureConfig(h)
-	cresp, err := Measure(req.Context(), measureConfig, &creq)
+	cresp, err := Measure(req.Context(), &creq)
 	if err != nil {
 		w.WriteHeader(400)
 		return

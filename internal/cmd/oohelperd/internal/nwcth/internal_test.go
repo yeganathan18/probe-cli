@@ -1,22 +1,73 @@
-package internal_test
+package nwcth
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/ooni/probe-cli/v3/internal/cmd/oohelperd/internal"
 	"github.com/ooni/probe-cli/v3/internal/iox"
-	"github.com/ooni/probe-cli/v3/internal/netxlite"
 )
 
-const simplerequest = `{
-	"http_request": "https://dns.google",
+const requestnoredirect = `{
+	"http_request": "https://ooni.org",
+	"http_request_headers": {
+	  "Accept": [
+		"*/*"
+	  ],
+	  "Accept-Language": [
+		"en-US;q=0.8,en;q=0.5"
+	  ],
+	  "User-Agent": [
+		"Mozilla/5.0"
+	  ]
+	},
+	"tcp_connect": [
+	  "8.8.8.8:443"
+	]
+}`
+
+const requestsimpleredirect = `{
+	"http_request": "https://www.ooni.org",
+	"http_request_headers": {
+	  "Accept": [
+		"*/*"
+	  ],
+	  "Accept-Language": [
+		"en-US;q=0.8,en;q=0.5"
+	  ],
+	  "User-Agent": [
+		"Mozilla/5.0"
+	  ]
+	},
+	"tcp_connect": [
+	  "8.8.8.8:443"
+	]
+}`
+
+const requestmultipleredirect = `{
+	"http_request": "http://яндекс.рф",
+	"http_request_headers": {
+	  "Accept": [
+		"*/*"
+	  ],
+	  "Accept-Language": [
+		"en-US;q=0.8,en;q=0.5"
+	  ],
+	  "User-Agent": [
+		"Mozilla/5.0"
+	  ]
+	},
+	"tcp_connect": [
+	  "8.8.8.8:443"
+	]
+}`
+
+const requestwithquic = `{
+	"http_request": "https://www.google.com",
 	"http_request_headers": {
 	  "Accept": [
 		"*/*"
@@ -52,12 +103,7 @@ const requestWithoutDomainName = `{
 }`
 
 func TestWorkingAsIntended(t *testing.T) {
-	handler := internal.Handler{
-		Client:            http.DefaultClient,
-		Dialer:            new(net.Dialer),
-		MaxAcceptableBody: 1 << 24,
-		Resolver:          &netxlite.ResolverSystem{},
-	}
+	handler := NWCTHHandler{}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	type expectationSpec struct {
@@ -93,7 +139,31 @@ func TestWorkingAsIntended(t *testing.T) {
 		name:            "with reasonably good request",
 		reqMethod:       "POST",
 		reqContentType:  "application/json",
-		reqBody:         simplerequest,
+		reqBody:         requestnoredirect,
+		respStatusCode:  200,
+		respContentType: "application/json",
+		parseBody:       true,
+	}, {
+		name:            "with reasonably good request",
+		reqMethod:       "POST",
+		reqContentType:  "application/json",
+		reqBody:         requestsimpleredirect,
+		respStatusCode:  200,
+		respContentType: "application/json",
+		parseBody:       true,
+	}, {
+		name:            "with reasonably good request",
+		reqMethod:       "POST",
+		reqContentType:  "application/json",
+		reqBody:         requestmultipleredirect,
+		respStatusCode:  200,
+		respContentType: "application/json",
+		parseBody:       true,
+	}, {
+		name:            "with reasonably good request",
+		reqMethod:       "POST",
+		reqContentType:  "application/json",
+		reqBody:         requestwithquic,
 		respStatusCode:  200,
 		respContentType: "application/json",
 		parseBody:       true,
@@ -144,15 +214,15 @@ func TestWorkingAsIntended(t *testing.T) {
 
 func TestHandlerWithRequestBodyReadingError(t *testing.T) {
 	expected := errors.New("mocked error")
-	handler := internal.Handler{MaxAcceptableBody: 1 << 24}
-	rw := internal.NewFakeResponseWriter()
+	handler := NWCTHHandler{}
+	rw := NewFakeResponseWriter()
 	req := &http.Request{
 		Method: "POST",
 		Header: map[string][]string{
 			"Content-Type":   {"application/json"},
 			"Content-Length": {"2048"},
 		},
-		Body: &internal.FakeBody{Err: expected},
+		Body: &FakeBody{Err: expected},
 	}
 	handler.ServeHTTP(rw, req)
 	if rw.StatusCode != 400 {

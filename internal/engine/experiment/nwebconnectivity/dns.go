@@ -17,26 +17,31 @@ type DNSConfig struct {
 	URL         *url.URL
 }
 
+type DNSMeasurement struct {
+	Addrs   []string
+	Failure *string
+	Queries []*DNSQueryEntry
+}
+
 // dnsLookup finds the IP address(es) associated with a domain name
-func dnsLookup(ctx context.Context, config *DNSConfig) []string {
-	tk := config.Measurement.TestKeys.(*TestKeys)
+func dnsLookup(ctx context.Context, measurement *model.Measurement, URL *url.URL) *DNSMeasurement {
+	dnsMeasurement := &DNSMeasurement{}
 	var r resolver.Resolver
 	r = &resolver.IDNAResolver{Resolver: &netxlite.ResolverSystem{}}
 	r = &errorsx.ErrorWrapperResolver{Resolver: r}
-	hostname := config.URL.Hostname()
+	hostname := URL.Hostname()
 	addrs, err := r.LookupHost(ctx, hostname)
 	stop := time.Now()
+	dnsMeasurement.Addrs = addrs
+	dnsMeasurement.Failure = archival.NewFailure(err)
 	for _, qtype := range []archival.DNSQueryType{"A", "AAAA"} {
-		entry := makeDNSQueryEntry(config.Measurement.MeasurementStartTimeSaved, stop)
+		entry := makeDNSQueryEntry(measurement.MeasurementStartTimeSaved, stop)
 		entry.setMetadata(r.(*errorsx.ErrorWrapperResolver), hostname)
 		entry.setResult(addrs, err, qtype)
 		if len(entry.Answers) <= 0 && err == nil {
 			continue
 		}
-		tk.Lock()
-		tk.Queries = append(tk.Queries, entry.DNSQueryEntry)
-		tk.Unlock()
+		dnsMeasurement.Queries = append(dnsMeasurement.Queries, entry)
 	}
-	tk.DNSExperimentFailure = archival.NewFailure(err)
-	return addrs
+	return dnsMeasurement
 }

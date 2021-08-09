@@ -2,9 +2,9 @@ package internal
 
 import (
 	"context"
-	"net"
+	"sync"
 
-	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
+	"github.com/ooni/probe-cli/v3/internal/engine/experiment/webconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx"
 	"github.com/ooni/probe-cli/v3/internal/engine/netx/archival"
 )
@@ -14,20 +14,19 @@ var newfailure = archival.NewFailure
 
 // CtrlDNSResult is the result of the DNS check performed by
 // the Web Connectivity test helper.
-type CtrlDNSResult = nwebconnectivity.ControlDNS
+type CtrlDNSResult = webconnectivity.ControlDNSResult
 
 // DNSConfig configures the DNS check.
 type DNSConfig struct {
 	Domain   string
+	Out      chan CtrlDNSResult
 	Resolver netx.Resolver
+	Wg       *sync.WaitGroup
 }
 
 // DNSDo performs the DNS check.
-func DNSDo(ctx context.Context, config *DNSConfig) CtrlDNSResult {
-	if net.ParseIP(config.Domain) != nil {
-		// handle IP address format input
-		return CtrlDNSResult{Failure: nil, Addrs: []string{config.Domain}}
-	}
+func DNSDo(ctx context.Context, config *DNSConfig) {
+	defer config.Wg.Done()
 	addrs, err := config.Resolver.LookupHost(ctx, config.Domain)
-	return CtrlDNSResult{Failure: newfailure(err), Addrs: addrs}
+	config.Out <- CtrlDNSResult{Failure: newfailure(err), Addrs: addrs}
 }

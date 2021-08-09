@@ -9,7 +9,6 @@ import (
 	"github.com/ooni/probe-cli/v3/internal/engine"
 	"github.com/ooni/probe-cli/v3/internal/engine/experiment/nwebconnectivity"
 	"github.com/ooni/probe-cli/v3/internal/engine/model"
-	"github.com/ooni/probe-cli/v3/internal/errorsx"
 )
 
 func TestNewExperimentMeasurer(t *testing.T) {
@@ -40,9 +39,6 @@ func TestSuccess(t *testing.T) {
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
 	if tk.ControlFailure != nil {
 		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
 	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
@@ -88,9 +84,6 @@ func TestMeasureWithCancelledContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
-	if *tk.DNSExperimentFailure != errorsx.FailureInterrupted {
-		t.Fatal("unexpected dns_experiment_failure")
-	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
 	}
@@ -100,40 +93,6 @@ func TestMeasureWithCancelledContext(t *testing.T) {
 	}
 	if _, ok := sk.(nwebconnectivity.SummaryKeys); !ok {
 		t.Fatal("invalid type for summary keys")
-	}
-}
-
-func TestWithTLSParrots(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip test in short mode")
-	}
-	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{ClientHello: "Chrome"})
-	ctx := context.Background()
-	sess := newsession(t, true)
-	measurement := &model.Measurement{Input: "https://www.google.com/"}
-	callbacks := model.NewPrinterCallbacks(log.Log)
-	err := measurer.Run(ctx, sess, measurement, callbacks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
-	if tk.ControlFailure != nil {
-		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
-	}
-	if tk.HTTPExperimentFailure != nil {
-		t.Fatal("unexpected http_experiment_failure")
-	}
-	for _, handshake := range tk.TLSHandshakes {
-		// we cannot use utls for h3 yet
-		if handshake.NegotiatedProtocol == "h3" {
-			continue
-		}
-		if handshake.Fingerprint != "Chrome" {
-			t.Fatal("unexpected TLS Client Hello fingerprint")
-		}
 	}
 }
 
@@ -154,9 +113,6 @@ func TestMeasureWithInputNotBeingAnURL(t *testing.T) {
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
 	if tk.ControlFailure != nil {
 		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
 	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
@@ -182,51 +138,8 @@ func TestMeasureWithUnsupportedInput(t *testing.T) {
 	if tk.ControlFailure != nil {
 		t.Fatal("unexpected control_failure")
 	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
-	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
-	}
-}
-
-func TestTLSHandshakeFails(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip test in short mode")
-	}
-	measurer := nwebconnectivity.NewExperimentMeasurer(nwebconnectivity.Config{})
-	ctx := context.Background()
-	sess := newsession(t, true)
-	measurement := &model.Measurement{Input: "https://wrong.host.badssl.com/"}
-	callbacks := model.NewPrinterCallbacks(log.Log)
-	err := measurer.Run(ctx, sess, measurement, callbacks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
-	if tk.ControlFailure != nil {
-		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
-	}
-	if tk.HTTPExperimentFailure != nil {
-		t.Fatal("unexpected http_experiment_failure")
-	}
-	if len(tk.TLSHandshakes) != 2 {
-		t.Fatal("unexpected number of TLS handshakes", len(tk.TLSHandshakes))
-	}
-	if tk.TLSHandshakes[0].Failure == nil {
-		t.Fatal("expected a TLS handshake failure")
-	}
-	if *tk.TLSHandshakes[0].Failure != errorsx.FailureSSLInvalidHostname {
-		t.Fatal("unexpected failure type")
-	}
-	if tk.TLSHandshakes[1].Failure == nil {
-		t.Fatal("expected a TLS handshake failure")
-	}
-	if *tk.TLSHandshakes[1].Failure != errorsx.FailureSSLInvalidCertificate {
-		t.Fatal("unexpected failure type", *tk.TLSHandshakes[1].Failure)
 	}
 }
 
@@ -246,9 +159,6 @@ func Test308RedirectWithoutLocationHeader(t *testing.T) {
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
 	if tk.ControlFailure != nil {
 		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
 	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")
@@ -271,9 +181,6 @@ func TestIDNARedirect(t *testing.T) {
 	tk := measurement.TestKeys.(*nwebconnectivity.TestKeys)
 	if tk.ControlFailure != nil {
 		t.Fatal("unexpected control_failure")
-	}
-	if tk.DNSExperimentFailure != nil {
-		t.Fatal("unexpected dns_experiment_failure")
 	}
 	if tk.HTTPExperimentFailure != nil {
 		t.Fatal("unexpected http_experiment_failure")

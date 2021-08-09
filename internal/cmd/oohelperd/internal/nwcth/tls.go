@@ -1,4 +1,4 @@
-package internal
+package nwcth
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"net"
 )
 
-// QUICConfig configures the QUIC handshake check.
+// TLSConfig configures the TLS handshake check.
 type TLSConfig struct {
 	Conn     net.Conn
 	Endpoint string
@@ -14,10 +14,10 @@ type TLSConfig struct {
 }
 
 // TLSDo performs the TLS check.
-func TLSDo(ctx context.Context, config *TLSConfig) (*tls.Conn, *CtrlTLSMeasurement) {
+func TLSDo(ctx context.Context, config *TLSConfig) (*tls.Conn, *TLSHandshakeMeasurement) {
 	c := tls.Client(config.Conn, config.Cfg)
 	err := c.Handshake()
-	return c, &CtrlTLSMeasurement{
+	return c, &TLSHandshakeMeasurement{
 		Failure: newfailure(err),
 	}
 }
